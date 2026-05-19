@@ -423,11 +423,10 @@ export function AdminVehicleFormPage() {
           {(imagePreview || vehicleForm.imageUrl) && (
             <div className="admin-preview glass-soft">
               <span>Önizleme</span>
-              <div className="vehicle-visual" style={{ marginTop: 12 }}>
+              <div className="admin-image-preview">
                 <img
                   src={imagePreview || vehicleForm.imageUrl}
                   alt={vehicleForm.name || "Araç önizleme"}
-                  style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 20 }}
                 />
               </div>
             </div>

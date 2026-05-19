@@ -39,7 +39,7 @@ function App() {
           <Route path="campaigns/:campaignId/duzenle" element={<AdminCampaignFormPage />} />
           <Route path="site" element={<AdminSitePage />} />
           <Route path="ai" element={<AdminAiPage />} />
-          <Route path="insights" element={<AdminAiPage />} />
+          <Route path="insights" element={<Navigate to="/admin/ai" replace />} />
         </Route>
       </Routes>
     </TripProvider>

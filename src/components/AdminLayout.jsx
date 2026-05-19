@@ -8,7 +8,6 @@ const adminNavItems = [
   ["/admin/campaigns", "Kampanyalar"],
   ["/admin/site", "Site Ayarları"],
   ["/admin/ai", "Gemini Uzman"],
-  ["/admin/insights", "İçgörüler"],
 ];
 
 export function AdminLayout() {
@@ -30,7 +29,7 @@ export function AdminLayout() {
               {siteSettings.logoUrl ? (
                 <img src={siteSettings.logoUrl} alt="" className="brand-image" />
               ) : (
-                siteSettings.logoText?.trim() || siteSettings.siteName?.trim()?.slice(0, 1) || "R"
+                siteSettings.logoText?.trim() || siteSettings.siteName?.trim()?.slice(0, 1) || "D"
               )}
             </span>
             <div className="admin-sidebar-brand-copy">

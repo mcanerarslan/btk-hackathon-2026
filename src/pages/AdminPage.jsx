@@ -1,15 +1,75 @@
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { buildCatalogSuggestions, findRiskyMatches, findVehicleDataGaps } from "../services/adminExpertService";
+import {
+  buildCatalogSuggestions,
+  findRiskyMatches,
+  findVehicleDataGaps,
+  generateAdminInsightCategory,
+} from "../services/adminExpertService";
 import { useTrip } from "../TripContext";
+
+const dashboardInsightCards = [
+  { key: "dataGaps", label: "Eksik veri", fallback: findVehicleDataGaps, emptyTitle: "Kritik eksik yok", emptyText: "Katalog verileri demo için yeterli görünüyor." },
+  { key: "riskyMatches", label: "Riskli eşleşme", fallback: findRiskyMatches, emptyTitle: "Risk düşük", emptyText: "Aktif rota için katalog dengeli." },
+  { key: "suggestions", label: "Geliştirme önerisi", fallback: buildCatalogSuggestions, emptyTitle: "Öneri yok", emptyText: "Katalog ve filtre yapısı dengeli görünüyor." },
+];
+
+function AdminInsightSummaryCard({ card, insight, loading, onRefresh }) {
+  const firstItem = insight.items[0];
+
+  return (
+    <article className="admin-insight-card glass">
+      <div className="admin-insight-head">
+        <div>
+          <span className="eyebrow">{card.label}</span>
+          <h3>{firstItem?.title || card.emptyTitle}</h3>
+        </div>
+        <button className="secondary-btn admin-refresh-btn" type="button" onClick={onRefresh} disabled={loading}>
+          {loading ? "AI tarıyor" : "Yenile"}
+        </button>
+      </div>
+      <p>{firstItem?.text || card.emptyText}</p>
+      <p className="admin-insight-meta">
+        {insight.source === "gemini" ? "Gemini buldu" : "Yerel analiz"}{insight.updatedAt ? ` · ${insight.updatedAt}` : ""}
+      </p>
+    </article>
+  );
+}
 
 export function AdminPage() {
   const { vehicles, ranked, state, aiRequestLog, geminiStatus, reservations, updateReservationStatus } = useTrip();
   const gaps = findVehicleDataGaps(vehicles);
   const risks = findRiskyMatches(vehicles, state);
   const suggestions = buildCatalogSuggestions(vehicles);
+  const [dashboardInsights, setDashboardInsights] = useState({});
+  const [insightLoading, setInsightLoading] = useState({});
+  const fallbackDashboardInsights = useMemo(
+    () =>
+      Object.fromEntries(
+        dashboardInsightCards.map((card) => [
+          card.key,
+          { items: card.fallback(vehicles, state), source: "fallback", updatedAt: "" },
+        ]),
+      ),
+    [vehicles, state],
+  );
   const averageScore = ranked.length
     ? Math.round(ranked.reduce((total, item) => total + item.score, 0) / ranked.length)
     : 0;
+
+  const refreshInsight = async (type) => {
+    setInsightLoading((current) => ({ ...current, [type]: true }));
+    const result = await generateAdminInsightCategory(type, vehicles, state);
+    setDashboardInsights((current) => ({ ...current, [type]: result }));
+    setInsightLoading((current) => ({ ...current, [type]: false }));
+  };
+
+  useEffect(() => {
+    dashboardInsightCards.forEach((card) => {
+      refreshInsight(card.key);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const stats = [
     ["Toplam araç", vehicles.length],
@@ -26,7 +86,7 @@ export function AdminPage() {
     <>
       <div className="section-heading admin-page-header">
         <span className="eyebrow">Admin özet</span>
-        <h2>Operasyonel rent a car dashboard</h2>
+        <h2>Operasyonel DriveWise dashboard</h2>
         <p>Katalog sağlığı, rota riskleri ve Gemini destekli karar noktaları tek ekranda izlenir.</p>
       </div>
 
@@ -81,21 +141,15 @@ export function AdminPage() {
       </div>
 
       <div className="admin-ai-grid three">
-        <article className="admin-insight-card glass">
-          <span className="eyebrow">Eksik veri</span>
-          <h3>{gaps[0]?.title || "Kritik eksik yok"}</h3>
-          <p>{gaps[0]?.text || "Katalog verileri demo için yeterli görünüyor."}</p>
-        </article>
-        <article className="admin-insight-card glass">
-          <span className="eyebrow">Riskli eşleşme</span>
-          <h3>{risks[0]?.title || "Risk düşük"}</h3>
-          <p>{risks[0]?.text || "Aktif rota için katalog dengeli."}</p>
-        </article>
-        <article className="admin-insight-card glass">
-          <span className="eyebrow">Geliştirme önerisi</span>
-          <h3>{suggestions[0]?.title}</h3>
-          <p>{suggestions[0]?.text}</p>
-        </article>
+        {dashboardInsightCards.map((card) => (
+          <AdminInsightSummaryCard
+            key={card.key}
+            card={card}
+            insight={dashboardInsights[card.key] || fallbackDashboardInsights[card.key]}
+            loading={Boolean(insightLoading[card.key])}
+            onRefresh={() => refreshInsight(card.key)}
+          />
+        ))}
       </div>
 
       <div className="admin-insight-card glass" style={{ marginTop: 18 }}>

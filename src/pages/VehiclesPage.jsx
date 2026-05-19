@@ -143,6 +143,24 @@ export function VehiclesPage() {
                 )}
                 <div className="badge">{vehicle.segment}</div>
               </div>
+              <div className="vehicle-quick-specs" aria-label={`${vehicle.name} temel özellikleri`}>
+                <span>
+                  <small>Yakıt</small>
+                  <strong>{vehicle.fuel}</strong>
+                </span>
+                <span>
+                  <small>Bagaj</small>
+                  <strong>{vehicle.luggage} L</strong>
+                </span>
+                <span>
+                  <small>Kapasite</small>
+                  <strong>{vehicle.seats} kişi</strong>
+                </span>
+                <span>
+                  <small>Vites</small>
+                  <strong>{vehicle.transmission || "Otomatik"}</strong>
+                </span>
+              </div>
               <h3>{vehicle.name}</h3>
               <div className="score">{computeScore(vehicle, state)}/100 Gemini uygunluk</div>
               <p className="details ai-insight-copy">
@@ -155,22 +173,6 @@ export function VehiclesPage() {
                 <div className="metric-row">
                   <span>Fiyat</span>
                   <strong>₺{vehicle.price}/gün</strong>
-                </div>
-                <div className="metric-row">
-                  <span>Yakıt</span>
-                  <strong>{vehicle.fuel}</strong>
-                </div>
-                <div className="metric-row">
-                  <span>Bagaj</span>
-                  <strong>{vehicle.luggage} L</strong>
-                </div>
-                <div className="metric-row">
-                  <span>Kapasite</span>
-                  <strong>{vehicle.seats} kişi</strong>
-                </div>
-                <div className="metric-row">
-                  <span>Vites</span>
-                  <strong>{vehicle.transmission || "Otomatik"}</strong>
                 </div>
                 <div className="metric-row">
                   <span>Skorlar</span>

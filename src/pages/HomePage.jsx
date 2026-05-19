@@ -1,16 +1,82 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { buildRecommendationSet, estimateFuelCost, getRouteLabel } from "../services/recommendationService";
 import { useTrip } from "../TripContext";
 
+function formatDateInput(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function getScenarioDates() {
+  const departure = new Date();
+  departure.setDate(departure.getDate() + 1);
+  const returning = new Date(departure);
+  returning.setDate(returning.getDate() + 3);
+  return {
+    departureDate: formatDateInput(departure),
+    returnDate: formatDateInput(returning),
+  };
+}
+
 export function HomePage() {
-  const { state, vehicles } = useTrip();
+  const { state, setState, vehicles } = useTrip();
+  const [livePanelIndex, setLivePanelIndex] = useState(0);
   const recommendationSet = buildRecommendationSet(vehicles, state);
   const popularVehicles = recommendationSet.scored.slice(0, 3);
+  const hasActiveRoute = Boolean(state.routeType);
+  const featuredEyebrow = hasActiveRoute ? "Rota uyumlu araçlar" : "Popüler araçlar";
+  const featuredTitle = hasActiveRoute
+    ? `${getRouteLabel(state.routeType)} için öne çıkanlar`
+    : "Popüler seçimlerden öne çıkanlar";
+  const featuredDescription = hasActiveRoute
+    ? "Seçtiğin rota tipine, bütçe ve yolcu bilgilerine göre en güçlü adaylar."
+    : "Rota bilgisi girildiğinde bu alan seçimine göre yeniden sıralanır.";
   const routeScenarios = [
-    ["İstanbul", "Rize", "Yayla ve uzun yol", "mountain"],
-    ["İzmir", "Bodrum", "Ekonomik hafta sonu", "city"],
-    ["Ankara", "Kapadokya", "Aile ve bagaj dengesi", "mixed"],
+    ["İstanbul", "Rize", "Yayla ve uzun yol", "mountain", "outdoor", 5, 3, 3200],
+    ["İzmir", "Bodrum", "Ekonomik hafta sonu", "city", "economy", 2, 1, 1800],
+    ["Ankara", "Kapadokya", "Aile ve bagaj dengesi", "mixed", "family", 4, 2, 2800],
   ];
+  const livePanelStates = [
+    {
+      score: "+%92",
+      scoreLabel: "uygunluk skoru",
+      luggage: "520L",
+      luggageLabel: "bagaj önerisi",
+      routeMode: state.routeType || "yayla",
+      routeLabel: "rota modu",
+      decision:
+        "5 kişi, 4 büyük valiz ve yayla rotası için küçük hatchback yerine SUV veya crossover önerildi.",
+    },
+    {
+      score: "₺4.8K",
+      scoreLabel: "tahmini toplam",
+      luggage: "4 valiz",
+      luggageLabel: "yük dengesi",
+      routeMode: "uzun yol",
+      routeLabel: "analiz modu",
+      decision:
+        "Uzun yol ve bagaj ihtiyacı birlikte hesaplanınca düşük tüketimli geniş bagajlı seçenekler öne alındı.",
+    },
+    {
+      score: "18 dk",
+      scoreLabel: "karar süresi",
+      luggage: "%87",
+      luggageLabel: "konfor uyumu",
+      routeMode: "ekonomi",
+      routeLabel: "öncelik",
+      decision:
+        "Bütçe önceliği yükseldiği için günlük kira ve yakıt tahmini düşük araçlar yeniden sıralandı.",
+    },
+  ];
+  const livePanel = livePanelStates[livePanelIndex];
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setLivePanelIndex((current) => (current + 1) % livePanelStates.length);
+    }, 2200);
+
+    return () => window.clearInterval(intervalId);
+  }, [livePanelStates.length]);
 
   return (
     <>
@@ -31,7 +97,7 @@ export function HomePage() {
           </p>
           <div className="hero-actions">
             <Link className="primary-btn large" to="/planner">
-              Robot Rent A Car Uzmanına Sor
+              DriveWise Uzmanına Sor
             </Link>
             <Link className="secondary-btn large" to="/vehicles">
               Araçları Klasik Olarak İncele
@@ -56,7 +122,7 @@ export function HomePage() {
         <div className="hero-visual reveal delay-1">
           <div className="visual-card glass">
             <div className="visual-card-top">
-              <span>Robot Rent Expert analiz paneli</span>
+              <span>DriveWise analiz paneli</span>
               <span className="status-dot">Çevrimiçi</span>
             </div>
             <div className="route-map">
@@ -86,33 +152,30 @@ export function HomePage() {
               <div className="map-label end-label">Rize</div>
             </div>
             <div className="mini-insights">
-              <div>
-                <strong>+%92</strong>
-                <span>uygunluk skoru</span>
+              <div className="live-insight-card" key={`score-${livePanelIndex}`}>
+                <strong>{livePanel.score}</strong>
+                <span>{livePanel.scoreLabel}</span>
               </div>
-              <div>
-                <strong>520L</strong>
-                <span>bagaj önerisi</span>
+              <div className="live-insight-card" key={`luggage-${livePanelIndex}`}>
+                <strong>{livePanel.luggage}</strong>
+                <span>{livePanel.luggageLabel}</span>
               </div>
-              <div>
-                <strong>{state.routeType}</strong>
-                <span>rota modu</span>
+              <div className="live-insight-card" key={`route-${livePanelIndex}`}>
+                <strong>{livePanel.routeMode}</strong>
+                <span>{livePanel.routeLabel}</span>
               </div>
             </div>
           </div>
           <div className="floating-note glass gemini-border">
-            <strong>Robot karar alanı</strong>
-            <p>
-              “5 kişi, 4 büyük valiz ve yayla rotası için küçük hatchback yerine SUV veya crossover
-              önerildi.”
-            </p>
+            <strong>Canlı karar özeti</strong>
+            <p>“{livePanel.decision}”</p>
           </div>
         </div>
       </section>
 
       <section className="section quick-start reveal">
         <div className="section-heading">
-          <span className="eyebrow">Robot nasıl karar verir?</span>
+          <span className="eyebrow">DriveWise nasıl karar verir?</span>
           <h2>Aramak yerine ihtiyacını anlat.</h2>
         </div>
         <div className="quick-grid">
@@ -160,8 +223,9 @@ export function HomePage() {
 
       <section className="section reveal">
         <div className="section-heading">
-          <span className="eyebrow">Popüler araçlar</span>
-          <h2>Aktif rotaya göre öne çıkanlar</h2>
+          <span className="eyebrow">{featuredEyebrow}</span>
+          <h2>{featuredTitle}</h2>
+          <p>{featuredDescription}</p>
         </div>
         <div className="vehicle-grid">
           {popularVehicles.map(({ vehicle, score }) => {
@@ -173,7 +237,7 @@ export function HomePage() {
                   <div className="badge">{vehicle.segment}</div>
                 </div>
                 <h3>{vehicle.name}</h3>
-                <div className="score">{score}/100 Robot skoru</div>
+                <div className="score">{score}/100 DriveWise skoru</div>
                 <p className="details">{vehicle.notes}</p>
                 <div className="vehicle-specs">
                   <div className="metric-row">
@@ -200,8 +264,36 @@ export function HomePage() {
           <h2>Jüri demosu için hızlı örnekler</h2>
         </div>
         <div className="quick-grid">
-          {routeScenarios.map(([from, to, title, routeType]) => (
-            <Link key={`${from}-${to}`} className="quick-card glass route-scenario" to="/planner">
+          {routeScenarios.map(([from, to, title, routeType, priority, adults, largeBags, budget]) => (
+            <Link
+              key={`${from}-${to}`}
+              className="quick-card glass route-scenario"
+              to="/planner"
+              onClick={() =>
+                setState((prev) => {
+                  const scenarioDates = getScenarioDates();
+                  return {
+                    ...prev,
+                    ...scenarioDates,
+                    step: 5,
+                    fromCity: from,
+                    toCity: to,
+                    routeType,
+                    priority,
+                    adults,
+                    children: 0,
+                    largeBags,
+                    mediumBags: 1,
+                    backpacks: 0,
+                    budget,
+                    purpose: priority === "economy" ? "cityUse" : "holiday",
+                    fuelPriority: priority === "economy" ? "economic" : "balanced",
+                    comfortPriority: priority === "family" ? "high" : "medium",
+                    vehiclePreference: "any",
+                  };
+                })
+              }
+            >
               <span>{getRouteLabel(routeType)}</span>
               <strong>{from} → {to}</strong>
               <p>{title}</p>

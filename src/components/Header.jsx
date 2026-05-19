@@ -13,7 +13,7 @@ const navItems = [
 
 export function Header() {
   const { siteSettings } = useTrip();
-  const logoLabel = siteSettings.logoText?.trim() || siteSettings.siteName?.trim()?.slice(0, 1) || "R";
+  const logoLabel = siteSettings.logoText?.trim() || siteSettings.siteName?.trim()?.slice(0, 1) || "D";
 
   return (
     <header className="site-header">
@@ -34,9 +34,6 @@ export function Header() {
         ))}
       </nav>
       <div className="header-actions">
-        <button className="ghost-btn" type="button">
-          TR
-        </button>
         <Link className="primary-btn" to="/planner">
           Uzmanla Seç
         </Link>

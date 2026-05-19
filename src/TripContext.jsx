@@ -1,5 +1,4 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   analysisStages,
   buildVehicleSummary,
@@ -15,6 +14,7 @@ import {
   generateGeminiText,
   generateStructuredRecommendation,
   getGeminiStatus,
+  getGeminiUserMessage,
   logAiDevEvent,
   sendTripQuestion,
 } from "./services/geminiService";
@@ -22,18 +22,217 @@ import {
 const TripContext = createContext(null);
 
 const defaultSiteSettings = {
-  siteName: "Robot Rent A Car",
-  logoText: "R",
+  siteName: "DriveWise",
+  logoText: "D",
   logoUrl: "",
   faviconUrl: "",
-  headerTitle: "Robot Rent A Car",
-  headerSubtitle: "Gemini destekli araç kiralama uzmanı",
-  footerText: "İhtiyacını anlat, robot uzman rota, bagaj, bütçe ve yol şartına göre aracı seçsin.",
+  headerTitle: "DriveWise",
+  headerSubtitle: "AI destekli akıllı araç seçimi",
+  footerText: "Rotanı, bagajını ve bütçeni anlat; DriveWise yolculuğuna en uygun aracı seçsin.",
   footerNote: "Demo panel · login gerekmez",
   footerLegal: "KVKK · Gizlilik · Kullanım Şartları",
 };
 
 const defaultReservations = [];
+const STORAGE_PREFIX = "drivewise";
+const LEGACY_STORAGE_PREFIX = "trip" + "ai";
+
+const storageKey = (name) => `${STORAGE_PREFIX}_${name}`;
+const legacyStorageKey = (name) => `${LEGACY_STORAGE_PREFIX}_${name}`;
+
+function getStoredValue(name) {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(storageKey(name)) || window.localStorage.getItem(legacyStorageKey(name));
+}
+
+function normalizeStoredSiteSettings(settings) {
+  const normalized = { ...defaultSiteSettings, ...settings };
+  const oldBrandPattern = new RegExp(
+    [
+      ["ro", "bot\\s*rent"].join(""),
+      ["rent\\s*a", "\\s*car"].join(""),
+      ["tr", "ip\\s*ai"].join(""),
+    ].join("|"),
+    "i",
+  );
+
+  if (oldBrandPattern.test(normalized.siteName || "")) normalized.siteName = defaultSiteSettings.siteName;
+  if (oldBrandPattern.test(normalized.headerTitle || "")) normalized.headerTitle = defaultSiteSettings.headerTitle;
+  if (oldBrandPattern.test(normalized.headerSubtitle || "")) normalized.headerSubtitle = defaultSiteSettings.headerSubtitle;
+  if (oldBrandPattern.test(normalized.footerText || "")) normalized.footerText = defaultSiteSettings.footerText;
+  if (!normalized.logoText || oldBrandPattern.test(normalized.logoText) || normalized.logoText === "R") {
+    normalized.logoText = defaultSiteSettings.logoText;
+  }
+
+  return normalized;
+}
+
+function getFirstNumberBefore(text, pattern) {
+  const match = text.match(pattern);
+  return match ? Number(match[1]) : null;
+}
+
+function buildQuestionState(question, state) {
+  const passengerCount = getFirstNumberBefore(question, /(\d+)\s*(?:kişi|kisi|yolcu)/i);
+  const luggageCount = getFirstNumberBefore(question, /(\d+)\s*(?:valiz|bavul|bagaj)/i);
+
+  return {
+    ...state,
+    ...(passengerCount
+      ? {
+          adults: passengerCount,
+          children: 0,
+        }
+      : {}),
+    ...(luggageCount
+      ? {
+          largeBags: luggageCount,
+          mediumBags: 0,
+          backpacks: 0,
+        }
+      : {}),
+  };
+}
+
+function normalizeQuestion(text) {
+  return text.toLocaleLowerCase("tr-TR");
+}
+
+function normalizeSearchText(text) {
+  return normalizeQuestion(text)
+    .replace(/ı/g, "i")
+    .replace(/ğ/g, "g")
+    .replace(/ü/g, "u")
+    .replace(/ş/g, "s")
+    .replace(/ö/g, "o")
+    .replace(/ç/g, "c");
+}
+
+function findMentionedVehicle(question, vehicles) {
+  const normalizedQuestion = normalizeSearchText(question);
+  return vehicles.find((vehicle) => {
+    const name = normalizeSearchText(vehicle.name);
+    const id = normalizeSearchText(vehicle.id).replace(/-/g, " ");
+    return normalizedQuestion.includes(name) || normalizedQuestion.includes(id);
+  });
+}
+
+function isCatalogAvailabilityQuestion(question) {
+  const normalized = normalizeSearchText(question);
+  return /(neden|niye|var mi|mevcut mu|katalogda|filoda).*(yok|var|mevcut)|(?:yok|var|mevcut).*(neden|niye|mi)/i.test(
+    normalized,
+  );
+}
+
+function extractRequestedVehicleLabel(question) {
+  return question
+    .replace(/\?/g, "")
+    .replace(/\b(neden|niye|yok|var mı|var mi|mevcut mu|katalogda|filoda|araç|arac|araba)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildCatalogAvailabilityReply(question, vehicles, mentionedVehicle) {
+  if (mentionedVehicle) {
+    return `${mentionedVehicle.name} filoda mevcut. ${mentionedVehicle.segment} sınıfında, günlük ₺${mentionedVehicle.price.toLocaleString("tr-TR")} fiyatlı ve ${mentionedVehicle.luggage} L bagaj hacmine sahip. Detay sayfasından uygunluk ve rezervasyon bilgisine bakabilirsin.`;
+  }
+
+  const requestedLabel = extractRequestedVehicleLabel(question);
+  const visibleName = requestedLabel || "Bu araç";
+  const alternatives = vehicles
+    .filter((vehicle) => vehicle.available !== false)
+    .slice(0, 3)
+    .map((vehicle) => vehicle.name)
+    .join(", ");
+
+  return `${visibleName} şu an filoda/katalogda görünmüyor. Bu yüzden yerine başka bir aracı seçmiş gibi gerekçe üretmem doğru olmaz. Mevcut alternatiflerden ${alternatives} gibi araçları inceleyebilirsin.`;
+}
+
+function getQuestionIntent(question) {
+  const normalized = normalizeQuestion(question);
+  if (/konfor|rahat|premium|lüks|luks/.test(normalized)) return "comfort";
+  if (/ekonom|az yak|yakıt|yakit|tasarruf|ucuz|bütçe|butce/.test(normalized)) return "economy";
+  if (/dağ|dag|yayla|arazi|kış|kis|kar|suv|yüksek|yuksek/.test(normalized)) return "outdoor";
+  if (/kalabalık|kalabalik|minivan|vip|çok valiz|cok valiz|geniş|genis/.test(normalized)) return "capacity";
+  return "balanced";
+}
+
+function buildWidgetVehicleSuggestions(question, vehicles, state) {
+  const recommendationIntent = /öner|uygun|hangi|araç|araba|valiz|bagaj|bavul|ekonom|konfor|rahat|premium|az yak|yakıt|yakit|dağ|dag|yayla|yol|suv|minivan|neden|seç|sec|tercih/i.test(question);
+  if (!recommendationIntent) return [];
+
+  if (isCatalogAvailabilityQuestion(question)) return [];
+
+  const mentionedVehicle = findMentionedVehicle(question, vehicles);
+  if (mentionedVehicle) {
+    return [
+      {
+        id: mentionedVehicle.id,
+        name: mentionedVehicle.name,
+        score: computeScore(mentionedVehicle, state),
+        meta: `${mentionedVehicle.seats} kişi · ${mentionedVehicle.luggage} L bagaj · ₺${mentionedVehicle.price}/gün`,
+      },
+    ];
+  }
+
+  const intent = getQuestionIntent(question);
+  const passengerCount = state.adults + state.children;
+  const luggageUnits = state.largeBags * 3 + state.mediumBags * 2 + state.backpacks;
+  const availableVehicles = vehicles.filter((vehicle) => vehicle.available !== false);
+  const capacityMatches = availableVehicles.filter(
+    (vehicle) =>
+      vehicle.seats >= passengerCount &&
+      (!luggageUnits || vehicle.luggage >= luggageUnits * 30),
+  );
+  const suggestionPool = capacityMatches.length ? capacityMatches : availableVehicles;
+
+  return suggestionPool
+    .map((vehicle) => {
+      let score = computeScore(vehicle, state);
+
+      if (intent === "economy") {
+        score += Math.max(0, 7 - vehicle.consumption) * 12;
+        score += Math.max(0, 3000 - vehicle.price) / 45;
+        if (vehicle.category === "economy") score += 18;
+        if (/hibrit|elektrik/i.test(vehicle.fuel)) score += 12;
+      }
+
+      if (intent === "comfort") {
+        score += vehicle.comfort * 9;
+        if (vehicle.category === "premium") score += 22;
+        if (vehicle.segmentTag === "premium") score += 14;
+        if (vehicle.segmentTag === "family" && vehicle.comfort >= 8) score += 8;
+      }
+
+      if (intent === "outdoor") {
+        if (vehicle.routeFit.some((fit) => ["mountain", "winter", "outdoor"].includes(fit))) score += 32;
+        if (["suv", "outdoor"].includes(vehicle.segmentTag)) score += 18;
+        score += vehicle.performance * 4;
+      }
+
+      if (intent === "capacity") {
+        score += vehicle.seats * 8;
+        score += vehicle.luggage / 18;
+        if (vehicle.segmentTag === "family") score += 15;
+      }
+
+      return { vehicle, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+    .map(({ vehicle, score }) => ({
+      id: vehicle.id,
+      name: vehicle.name,
+      score,
+      meta: `${vehicle.seats} kişi · ${vehicle.luggage} L bagaj · ₺${vehicle.price}/gün`,
+    }));
+}
+
+function formatRouteLabel(state) {
+  const fromCity = state.fromCity.trim();
+  const toCity = state.toCity.trim();
+  return fromCity && toCity ? `${fromCity} → ${toCity}` : "Rota belirtilmedi";
+}
 
 function mergeVehicleCatalog(storedVehicles) {
   if (!Array.isArray(storedVehicles)) return baseVehicles;
@@ -56,12 +255,11 @@ function mergeVehicleCatalog(storedVehicles) {
 }
 
 export function TripProvider({ children }) {
-  const navigate = useNavigate();
   const [state, setState] = useState(initialState);
   const [vehicles, setVehicles] = useState(() => {
     if (typeof window === "undefined") return baseVehicles;
     try {
-      const stored = window.localStorage.getItem("tripai_vehicles");
+      const stored = getStoredValue("vehicles");
       return stored ? mergeVehicleCatalog(JSON.parse(stored)) : baseVehicles;
     } catch {
       return baseVehicles;
@@ -73,6 +271,7 @@ export function TripProvider({ children }) {
   const [analysisStatus, setAnalysisStatus] = useState("Hazırlanıyor");
   const [analysisSnippet, setAnalysisSnippet] = useState("Rota analiz ediliyor...");
   const [aiRecommendation, setAiRecommendation] = useState(null);
+  const [smartRecommendationVisible, setSmartRecommendationVisible] = useState(false);
   const [aiRecommendationLoading, setAiRecommendationLoading] = useState(false);
   const [aiRecommendationError, setAiRecommendationError] = useState("");
   const [widgetOpen, setWidgetOpen] = useState(false);
@@ -82,14 +281,15 @@ export function TripProvider({ children }) {
     {
       id: "welcome-0",
       kind: "assistant",
-      text: "Merhaba, ben Gemini destekli Robot Rent Expert. Rota, kişi ve bagaj bilgine göre en uygun aracı açıklamalı şekilde bulurum.",
+      text:
+        "Merhaba, ben DriveWise AI asistanı. Rota, kişi ve bagaj bilgine göre en uygun aracı açıklamalı şekilde bulurum.\n---\nBu panel bulunduğun sayfaya göre soru sorabilir. Örneğin, 4 kişi ve 3 valiz için hangi araç uygun diye sorabilirsin.",
     },
   ]);
   const [siteSettings, setSiteSettings] = useState(() => {
     if (typeof window === "undefined") return defaultSiteSettings;
     try {
-      const stored = window.localStorage.getItem("tripai_site_settings");
-      return stored ? { ...defaultSiteSettings, ...JSON.parse(stored) } : defaultSiteSettings;
+      const stored = getStoredValue("site_settings");
+      return stored ? normalizeStoredSiteSettings(JSON.parse(stored)) : defaultSiteSettings;
     } catch {
       return defaultSiteSettings;
     }
@@ -97,7 +297,7 @@ export function TripProvider({ children }) {
   const [reservations, setReservations] = useState(() => {
     if (typeof window === "undefined") return defaultReservations;
     try {
-      const stored = window.localStorage.getItem("tripai_reservations");
+      const stored = getStoredValue("reservations");
       return stored ? JSON.parse(stored) : defaultReservations;
     } catch {
       return defaultReservations;
@@ -106,7 +306,7 @@ export function TripProvider({ children }) {
   const [campaigns, setCampaigns] = useState(() => {
     if (typeof window === "undefined") return baseCampaigns;
     try {
-      const stored = window.localStorage.getItem("tripai_campaigns");
+      const stored = getStoredValue("campaigns");
       return stored ? mergeCampaignCatalog(JSON.parse(stored)) : baseCampaigns;
     } catch {
       return baseCampaigns;
@@ -157,7 +357,7 @@ export function TripProvider({ children }) {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem("tripai_vehicles", JSON.stringify(vehicles));
+      window.localStorage.setItem(storageKey("vehicles"), JSON.stringify(vehicles));
     } catch {
       // Ignore storage failures in demo mode.
     }
@@ -165,7 +365,7 @@ export function TripProvider({ children }) {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem("tripai_site_settings", JSON.stringify(siteSettings));
+      window.localStorage.setItem(storageKey("site_settings"), JSON.stringify(siteSettings));
     } catch {
       // Ignore storage failures in demo mode.
     }
@@ -173,7 +373,7 @@ export function TripProvider({ children }) {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem("tripai_reservations", JSON.stringify(reservations));
+      window.localStorage.setItem(storageKey("reservations"), JSON.stringify(reservations));
     } catch {
       // Ignore storage failures in demo mode.
     }
@@ -181,7 +381,7 @@ export function TripProvider({ children }) {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem("tripai_campaigns", JSON.stringify(campaigns));
+      window.localStorage.setItem(storageKey("campaigns"), JSON.stringify(campaigns));
     } catch {
       // Ignore storage failures in demo mode.
     }
@@ -200,7 +400,7 @@ export function TripProvider({ children }) {
     favicon.href = siteSettings.faviconUrl || siteSettings.logoUrl || "/favicon.svg";
   }, [siteSettings.faviconUrl, siteSettings.logoUrl, siteSettings.siteName]);
 
-  const routeLabel = `${state.fromCity} → ${state.toCity}`;
+  const routeLabel = formatRouteLabel(state);
 
   const appendAiLog = (entry) => {
     setAiRequestLog((prev) =>
@@ -221,19 +421,6 @@ export function TripProvider({ children }) {
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
-
-  useEffect(() => {
-    if (!widgetOpen) return;
-    if (messages.length > 1) return;
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: `message-${messageIdRef.current++}`,
-        kind: "assistant",
-        text: "Bu panel bulunduğun sayfaya göre soru sorabilir. Örneğin, 4 kişi ve 3 valiz için hangi araç uygun diye sorabilirsin.",
-      },
-    ]);
-  }, [widgetOpen, messages.length]);
 
   useEffect(() => {
     if (!analysisRunning) return undefined;
@@ -288,35 +475,67 @@ export function TripProvider({ children }) {
 
   const handleCounter = (key, delta) => {
     setState((prev) => {
-      const min = key === "adults" ? 1 : 0;
+      const min = 0;
       const max = key === "adults" ? 8 : 6;
-      return { ...prev, [key]: clamp(prev[key] + delta, min, max) };
+      const current = Number(prev[key] || 0);
+      return { ...prev, [key]: clamp(current + delta, min, max) };
     });
   };
 
   const handleAnalyze = () => {
-    if (!state.fromCity.trim() || !state.toCity.trim() || !state.departureDate) {
+    const totalPassengers = Number(state.adults || 0) + Number(state.children || 0);
+    const dailyBudget = Number(state.budget || 0);
+    const departureTime = state.departureDate ? new Date(state.departureDate).getTime() : NaN;
+    const returnTime = state.returnDate ? new Date(state.returnDate).getTime() : NaN;
+    const missingRequired =
+      !state.fromCity.trim() ||
+      !state.toCity.trim() ||
+      !state.departureDate ||
+      !state.returnDate ||
+      !state.purpose ||
+      !state.routeType ||
+      !state.priority ||
+      !state.fuelPriority ||
+      !state.comfortPriority ||
+      !state.vehiclePreference ||
+      totalPassengers < 1 ||
+      !dailyBudget;
+
+    if (missingRequired) {
       setAnalysisVisible(false);
       setAnalysisRunning(false);
+      setSmartRecommendationVisible(false);
+      setAiRecommendation(null);
       setAnalysisStatus("Eksik bilgi");
-      setAnalysisSnippet("Başlangıç, varış ve tarih bilgisi olmadan analiz başlatılamaz.");
-      window.alert("Analiz için başlangıç, varış ve yolculuk tarihi gerekli.");
+      setAnalysisSnippet("Akıllı öneri için rota, tarih, yolcu, bütçe ve tercih alanlarını doldur.");
+      window.alert("Akıllı öneri için rota, tarih, yolcu, bütçe ve tercih alanlarını doldurmalısın.");
+      return;
+    }
+
+    if (!Number.isNaN(departureTime) && !Number.isNaN(returnTime) && returnTime <= departureTime) {
+      setAnalysisVisible(false);
+      setAnalysisRunning(false);
+      setSmartRecommendationVisible(false);
+      setAiRecommendation(null);
+      setAnalysisStatus("Tarih hatası");
+      setAnalysisSnippet("Dönüş tarihi gidiş tarihinden sonra olmalı.");
+      window.alert("Dönüş tarihi gidiş tarihinden sonra olmalı.");
       return;
     }
 
     setAnalysisVisible(true);
+    setSmartRecommendationVisible(true);
     setAnalysisRunning(true);
     setAiRecommendationLoading(true);
     setAiRecommendationError("");
     setAnalysisStep(0);
-    setAnalysisStatus("Analiz başlatıldı");
-    setAnalysisSnippet("Rota analiz ediliyor...");
-    navigate("/analysis");
+    setAnalysisStatus("Öneri başlatıldı");
+    setAnalysisSnippet("Araç uygunluğu hesaplanıyor...");
 
     generateStructuredRecommendation(state, vehicles)
       .then((result) => {
         setAiRecommendation(result.data);
-        setAiRecommendationError(result.error || "");
+        setAiRecommendationError(getGeminiUserMessage(result.error));
         appendAiLog({
           area: "Agentic JSON öneri",
           question: `${state.fromCity} - ${state.toCity}`,
@@ -325,7 +544,7 @@ export function TripProvider({ children }) {
         });
       })
       .catch((error) => {
-        setAiRecommendationError(error.message);
+        setAiRecommendationError(getGeminiUserMessage(error));
       })
       .finally(() => {
         setAiRecommendationLoading(false);
@@ -337,18 +556,40 @@ export function TripProvider({ children }) {
     if (!trimmed) return;
     const userMessageId = `message-${messageIdRef.current++}`;
     const assistantMessageId = `message-${messageIdRef.current++}`;
-    const topVehicle = ranked[0]?.vehicle;
+    const questionState = buildQuestionState(trimmed, state);
+    const vehicleSuggestions = buildWidgetVehicleSuggestions(trimmed, vehicles, questionState);
+    const mentionedVehicle = findMentionedVehicle(trimmed, vehicles);
+    const isAvailabilityQuestion = isCatalogAvailabilityQuestion(trimmed);
+    const topVehicle =
+      isAvailabilityQuestion
+        ? mentionedVehicle
+        : mentionedVehicle ||
+      (vehicleSuggestions.length
+        ? vehicles.find((vehicle) => vehicle.id === vehicleSuggestions[0].id)
+        : ranked[0]?.vehicle);
 
     setMessages((prev) => [
       ...prev,
       { id: userMessageId, kind: "user", text: trimmed },
-      { id: assistantMessageId, kind: "assistant", text: "Gemini yanıtlıyor..." },
+      { id: assistantMessageId, kind: "assistant", text: "Gemini yanıtlıyor...", vehicleSuggestions: [] },
     ]);
     setWidgetDraft("");
 
+    if (isAvailabilityQuestion) {
+      window.setTimeout(() => {
+        const text = buildCatalogAvailabilityReply(trimmed, vehicles, mentionedVehicle);
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === assistantMessageId ? { ...message, text, vehicleSuggestions: mentionedVehicle ? vehicleSuggestions : [] } : message,
+          ),
+        );
+      }, 180);
+      return;
+    }
+
     sendTripQuestion({
       question: trimmed,
-      state,
+      state: questionState,
       topVehicle,
       currentRoute: routeLabel,
     }).then((result) => {
@@ -357,7 +598,7 @@ export function TripProvider({ children }) {
         window.setTimeout(() => {
           setMessages((prev) =>
             prev.map((message) =>
-              message.id === assistantMessageId ? { ...message, text: result.text } : message,
+              message.id === assistantMessageId ? { ...message, text: result.text, vehicleSuggestions } : message,
             ),
           );
         }, 180);
@@ -366,7 +607,7 @@ export function TripProvider({ children }) {
 
       setMessages((prev) =>
         prev.map((message) =>
-          message.id === assistantMessageId ? { ...message, text: result.text } : message,
+          message.id === assistantMessageId ? { ...message, text: result.text, vehicleSuggestions } : message,
         ),
       );
     });
@@ -487,7 +728,7 @@ export function TripProvider({ children }) {
     const selectedOpening = openings[Math.floor(variationKey / angles.length) % openings.length];
     console.info(`[AI] Admin arac aciklamasi uretilecek: ${vehicle.name}`);
     const prompt = [
-      "Sen bir rent a car katalog metni yazarı ve araç uygunluk uzmanısın.",
+      "Sen bir DriveWise katalog metni yazarı ve araç uygunluk uzmanısın.",
       "Görev: Aşağıdaki tek araç için katalog kartında kullanılacak açıklayıcı araç betimlemesi üret.",
       "Yanıt yalnızca Türkçe olsun ve 2-3 doğal cümleden oluşsun.",
       "Toplam uzunluk 280-420 karakter aralığında olsun.",
@@ -571,6 +812,7 @@ export function TripProvider({ children }) {
     updateReservationStatus,
     aiRequestLog,
     aiRecommendation,
+    smartRecommendationVisible,
     aiRecommendationLoading,
     aiRecommendationError,
     geminiStatus: getGeminiStatus(),

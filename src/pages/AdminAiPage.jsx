@@ -1,19 +1,39 @@
 import { useEffect, useMemo, useState } from "react";
-import { buildCatalogSuggestions, findRiskyMatches, findVehicleDataGaps, generateExpertReport } from "../services/adminExpertService";
+import {
+  buildCatalogSuggestions,
+  findRiskyMatches,
+  findVehicleDataGaps,
+  generateAdminInsightCategory,
+  generateExpertReport,
+} from "../services/adminExpertService";
 import { useTrip } from "../TripContext";
+
+const insightCategories = [
+  { key: "dataGaps", title: "Eksik araç verisi", fallback: findVehicleDataGaps },
+  { key: "riskyMatches", title: "Riskli rota/araç", fallback: findRiskyMatches },
+  { key: "suggestions", title: "Geliştirme önerisi", fallback: buildCatalogSuggestions },
+];
 
 function SeverityBadge({ severity }) {
   const label = severity === "high" ? "Yüksek" : severity === "medium" ? "Orta" : "Düşük";
   return <span className={`severity-badge ${severity}`}>{label}</span>;
 }
 
-function InsightList({ title, items }) {
+function InsightList({ title, items, loading, source, updatedAt, onRefresh }) {
   return (
     <div className="admin-insight-card glass">
-      <div className="section-heading compact">
-        <span className="eyebrow">{title}</span>
-        <h3>{items.length} kayıt</h3>
+      <div className="admin-insight-head">
+        <div className="section-heading compact">
+          <span className="eyebrow">{title}</span>
+          <h3>{items.length} kayıt</h3>
+        </div>
+        <button className="secondary-btn admin-refresh-btn" type="button" onClick={onRefresh} disabled={loading}>
+          {loading ? "AI tarıyor" : "AI ile yenile"}
+        </button>
       </div>
+      <p className="admin-insight-meta">
+        {source === "gemini" ? "Gemini buldu" : "Yerel analiz"}{updatedAt ? ` · ${updatedAt}` : ""}
+      </p>
       <div className="admin-insight-list">
         {items.length ? (
           items.map((item) => (
@@ -37,10 +57,26 @@ export function AdminAiPage() {
   const { vehicles, state, aiRequestLog, geminiStatus } = useTrip();
   const [expertReport, setExpertReport] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [insights, setInsights] = useState(() =>
+    Object.fromEntries(
+      insightCategories.map((category) => [
+        category.key,
+        { items: [], source: "fallback", updatedAt: "" },
+      ]),
+    ),
+  );
+  const [insightLoading, setInsightLoading] = useState({});
 
-  const gaps = useMemo(() => findVehicleDataGaps(vehicles), [vehicles]);
-  const risks = useMemo(() => findRiskyMatches(vehicles, state), [vehicles, state]);
-  const suggestions = useMemo(() => buildCatalogSuggestions(vehicles), [vehicles]);
+  const fallbackInsights = useMemo(
+    () =>
+      Object.fromEntries(
+        insightCategories.map((category) => [
+          category.key,
+          { items: category.fallback(vehicles, state), source: "fallback", updatedAt: "" },
+        ]),
+      ),
+    [vehicles, state],
+  );
 
   const runExpert = async () => {
     setLoading(true);
@@ -49,8 +85,18 @@ export function AdminAiPage() {
     setLoading(false);
   };
 
+  const refreshInsight = async (type) => {
+    setInsightLoading((current) => ({ ...current, [type]: true }));
+    const result = await generateAdminInsightCategory(type, vehicles, state);
+    setInsights((current) => ({ ...current, [type]: result }));
+    setInsightLoading((current) => ({ ...current, [type]: false }));
+  };
+
   useEffect(() => {
     runExpert();
+    insightCategories.forEach((category) => {
+      refreshInsight(category.key);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -103,9 +149,23 @@ export function AdminAiPage() {
       </div>
 
       <div className="admin-ai-grid three">
-        <InsightList title="Eksik araç verisi" items={gaps} />
-        <InsightList title="Riskli rota/araç" items={risks} />
-        <InsightList title="Geliştirme önerisi" items={suggestions} />
+        {insightCategories.map((category) => {
+          const insight = insights[category.key]?.items?.length || insights[category.key]?.updatedAt
+            ? insights[category.key]
+            : fallbackInsights[category.key];
+
+          return (
+            <InsightList
+              key={category.key}
+              title={category.title}
+              items={insight.items}
+              loading={Boolean(insightLoading[category.key])}
+              source={insight.source}
+              updatedAt={insight.updatedAt}
+              onRefresh={() => refreshInsight(category.key)}
+            />
+          );
+        })}
       </div>
 
       <div className="admin-insight-card glass" style={{ marginTop: 18 }}>

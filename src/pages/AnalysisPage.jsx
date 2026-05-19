@@ -15,15 +15,6 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { useTrip } from "../TripContext";
-import { analysisStages, comparisonMetrics, formatComparisonValue } from "../data";
-import {
-  buildDecisionSummary,
-  buildEliminationNotes,
-  buildRecommendationSet,
-  estimateFuelCost,
-  getLuggageFit,
-  getRouteLabel,
-} from "../services/recommendationService";
 import { buildGoogleMapsUrl, fetchLiveRoute } from "../services/mapsService";
 
 const routePresets = [
@@ -73,21 +64,6 @@ function inferRouteProfile(from, to, routeType) {
   };
 }
 
-function buildRoutePrompt(from, to, profile, topVehicle, note) {
-  return [
-    `${from} - ${to} rotasını rent a car müşterisi için analiz et.`,
-    "Kısa Türkçe yanıt ver. Kaza, yol çalışması, ücretli yol, yokuş/eğim, dağ ve viraj risklerini ayrı ayrı belirt.",
-    "Canlı trafik verisi kesin değilse bunu varsayım olarak söyle.",
-    note ? `Kullanıcı notu: ${note}` : "",
-    topVehicle ? `Önerilen araç: ${topVehicle.name}, ${topVehicle.segment}.` : "",
-    `Tahmini mesafe: ${profile.distance} km.`,
-    `Yol profili: ${profile.roadCondition}`,
-    `Ücretli yol: ${profile.tolls}`,
-    `Eğim: ${profile.slope}`,
-    `Viraj: ${profile.curve}`,
-  ].join("\n");
-}
-
 function buildLiveRouteReport(from, to, route, profile, note) {
   const warnings = route.warnings.length ? route.warnings.join(" ") : "Google rota yanıtında özel uyarı dönmedi.";
   const trafficText = route.hasTrafficDelay
@@ -109,47 +85,145 @@ function buildLiveRouteReport(from, to, route, profile, note) {
     .join("\n");
 }
 
+const routeTypeLabels = {
+  city: "şehir içi",
+  long: "uzun yol",
+  mountain: "dağ/yayla",
+  winter: "kış",
+  outdoor: "outdoor",
+  mixed: "karma yol",
+};
+
+function getVehicleRouteCharacter(vehicle) {
+  const searchable = `${vehicle.name} ${vehicle.segment} ${vehicle.segmentTag} ${vehicle.fuel}`.toLocaleLowerCase("tr-TR");
+  if (/elektrik/.test(searchable)) {
+    return `${vehicle.performance}/10 performans ve elektrikli aktarma, ani hızlanma ihtiyacı olan bağlantılarda güçlü kalır`;
+  }
+  if (vehicle.category === "outdoor" || vehicle.segmentTag === "suv") {
+    return `${vehicle.segment.toLocaleLowerCase("tr-TR")} gövde yapısı, bozuk zemin ve eğimli kesitlerde daha rahat hareket alanı verir`;
+  }
+  if (vehicle.comfort >= 9) {
+    return `${vehicle.comfort}/10 konfor puanı, uzun sürüşte yorgunluğu azaltan tarafını öne çıkarır`;
+  }
+  if (vehicle.consumption <= 5.2) {
+    return `${vehicle.consumption} L/100km tüketim, trafik veya uzayan rota ihtimalinde maliyeti aşağıda tutar`;
+  }
+  return `${vehicle.performance}/10 performans ve ${vehicle.comfort}/10 konfor dengesi, rota belirsizliğinde güvenli bir orta nokta sunar`;
+}
+
+function buildRouteAiReason(vehicle, profile, liveRoute, signals, rank) {
+  const routeLabel = routeTypeLabels[profile.recommendedRouteType] || "rota";
+  const firstFocus = signals.hasSteepSlope
+    ? "eğimli/yayla hattında"
+    : signals.hasCurves
+      ? "viraj ve dar kesit ihtimalinde"
+      : signals.hasTrafficRisk
+        ? "trafik gecikmesi olasılığında"
+        : signals.hasTollOrLongRoad
+          ? "uzun veya otoyol ağırlıklı kullanımda"
+          : `${routeLabel} profilinde`;
+  const character = getVehicleRouteCharacter(vehicle);
+  const liveDetail = liveRoute?.ok
+    ? `Canlı kontrol ${liveRoute.distanceKm} km ve ${liveRoute.duration} gösterdiği için`
+    : "Canlı trafik verisi kesinleşmeden";
+  const capacityDetail =
+    vehicle.luggage >= 520
+      ? `${vehicle.luggage} L bagaj hacmi, plansız yük artışına tolerans bırakır`
+      : vehicle.seats >= 7
+        ? `${vehicle.seats} koltuk kapasitesi, kalabalık yolculukta daha esnek kalır`
+        : `${vehicle.consumption} L/100km tüketim ve ${vehicle.transmission || "otomatik"} vites günlük kullanımı sade tutar`;
+  const rankingAngle = [
+    `${firstFocus} ilk tercih sebebi ${character}.`,
+    `${firstFocus} bu aracı listede tutan fark ${character}.`,
+    `${firstFocus} alternatif olarak değerli; çünkü ${character}.`,
+  ][rank] || `${firstFocus} ${character}.`;
+
+  return `${rankingAngle} ${liveDetail} ${capacityDetail}.`;
+}
+
+function buildRouteVehicleRecommendations(vehicles, state, profile, liveRoute) {
+  const hasSteepSlope = /yüksek|yayla|dağ/i.test(profile.slope);
+  const hasCurves = /viraj|dar/i.test(profile.curve);
+  const hasVariableRoad = /kaygan|dar|değişken|tünel|sahil|yerel/i.test(profile.roadCondition);
+  const hasTrafficRisk = Boolean(liveRoute?.ok && liveRoute.hasTrafficDelay);
+  const hasRoadworkRisk = Boolean(liveRoute?.ok && liveRoute.warnings.length);
+  const hasTollOrLongRoad = /ücretli|otoyol|köprü/i.test(profile.tolls) || profile.distance >= 500;
+  const targetRouteTypes = new Set(
+    [
+      profile.recommendedRouteType,
+      hasSteepSlope ? "mountain" : "",
+      hasCurves ? "mixed" : "",
+      hasVariableRoad ? "outdoor" : "",
+      hasTollOrLongRoad ? "long" : "",
+    ].filter(Boolean),
+  );
+
+  return vehicles
+    .filter((vehicle) => vehicle.available !== false)
+    .map((vehicle) => {
+      let score = 42;
+      const routeMatches = vehicle.routeFit.some((routeType) => targetRouteTypes.has(routeType));
+      const isSuvLike = vehicle.segmentTag === "suv" || vehicle.category === "outdoor";
+      const totalPassengers = Number(state.adults || 0) + Number(state.children || 0);
+      const luggageUnits =
+        Number(state.largeBags || 0) * 3 + Number(state.mediumBags || 0) * 2 + Number(state.backpacks || 0);
+
+      if (routeMatches) {
+        score += 18;
+      }
+      if (hasSteepSlope) {
+        score += vehicle.performance >= 8 ? 18 : vehicle.performance >= 7 ? 10 : -14;
+      }
+      if (hasCurves) {
+        score += vehicle.comfort >= 8 ? 12 : vehicle.comfort >= 7 ? 7 : -4;
+      }
+      if (hasVariableRoad || hasRoadworkRisk) {
+        score += isSuvLike ? 16 : routeMatches ? 8 : -6;
+      }
+      if (hasTrafficRisk) {
+        score += vehicle.consumption <= 5.6 ? 10 : vehicle.transmission === "Otomatik" ? 5 : 0;
+      }
+      if (hasTollOrLongRoad) {
+        score += vehicle.comfort >= 8 ? 9 : 0;
+        score += vehicle.consumption <= 6.2 ? 7 : 0;
+      }
+      if (totalPassengers > 0) score += vehicle.seats >= totalPassengers ? 8 : -18;
+      if (luggageUnits > 0) score += vehicle.luggage >= luggageUnits * 35 ? 9 : vehicle.luggage >= luggageUnits * 25 ? 4 : -12;
+
+      return {
+        vehicle,
+        score: Math.max(0, Math.min(100, Math.round(score))),
+      };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+    .map((item, index) => ({
+      ...item,
+      reason: buildRouteAiReason(
+        item.vehicle,
+        profile,
+        liveRoute,
+        { hasSteepSlope, hasCurves, hasTrafficRisk, hasTollOrLongRoad },
+        index,
+      ),
+    }));
+}
+
 export function AnalysisPage() {
-  const {
-    analysisVisible,
-    analysisStep,
-    analysisStatus,
-    analysisSnippet,
-    ranked,
-    state,
-    setState,
-    vehicles,
-    aiRecommendation,
-    aiRecommendationLoading,
-    aiRecommendationError,
-    buildRiskWarnings,
-    askGemini,
-  } = useTrip();
+  const { state, setState, vehicles } = useTrip();
   const [fromPlace, setFromPlace] = useState(state.fromCity);
   const [toPlace, setToPlace] = useState(state.toCity);
   const [routeNote, setRouteNote] = useState("");
   const [aiRouteReport, setAiRouteReport] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [departureMode, setDepartureMode] = useState("now");
-  const [futureDeparture, setFutureDeparture] = useState(`${state.departureDate}T09:00`);
+  const [futureDeparture, setFutureDeparture] = useState(state.departureDate ? `${state.departureDate}T09:00` : "");
   const [liveRoute, setLiveRoute] = useState(null);
   const [liveRouteLoading, setLiveRouteLoading] = useState(false);
-  const top = ranked[0]?.vehicle;
-  const totalPassengers = state.adults + state.children;
-  const luggageNeed = state.largeBags * 3 + state.mediumBags * 2 + state.backpacks;
-  const progress = `${((analysisStep + 1) / analysisStages.length) * 100}%`;
   const routeProfile = useMemo(
     () => inferRouteProfile(fromPlace, toPlace, state.routeType),
     [fromPlace, toPlace, state.routeType],
   );
-  const recommendationSet = buildRecommendationSet(vehicles, state);
-  const decisionCards = [
-    ["En ekonomik araç", recommendationSet.economical],
-    ["En dengeli araç", recommendationSet.balanced],
-    ["En konforlu/güvenli araç", recommendationSet.comfort],
-  ].filter(([, item]) => item?.vehicle);
-  const selectedIds = Array.from(new Set(decisionCards.map(([, item]) => item.vehicle.id)));
-  const eliminationNotes = buildEliminationNotes(vehicles, state, selectedIds);
   const now = Date.now();
   const selectedFutureTime = futureDeparture ? new Date(futureDeparture).getTime() : 0;
   const departureDate = new Date(
@@ -196,8 +270,10 @@ export function AnalysisPage() {
     ? `${liveRoute.message} Google Haritalar butonundan rotayı anlık harita üzerinde açabilirsin. İleri tarih seçilirse sonuç, canlı trafik yerine tarihsel trafik modeline daha fazla dayanabilir.`
     : `${fromPlace} - ${toPlace} için canlı Google rota verisi henüz alınmadı. Google Routes API anahtarı bağlandığında trafik dahil süre, normal süre, ücretli yol ve harita uyarıları bu panelde güncellenir. ${routeProfile.slope} ve ${routeProfile.curve.toLocaleLowerCase("tr-TR")} araç seçimi için dikkate alınır.${routeNote ? ` Ek not: ${routeNote}` : ""}`;
   const googleMapsUrl = buildGoogleMapsUrl(fromPlace, toPlace);
-  const findRecommendedVehicle = (item) =>
-    vehicles.find((vehicle) => vehicle.id === item?.id || vehicle.name === item?.name);
+  const routeVehicleRecommendations = useMemo(
+    () => buildRouteVehicleRecommendations(vehicles, state, routeProfile, liveRoute),
+    [vehicles, state, routeProfile, liveRoute],
+  );
 
   useEffect(() => {
     setLiveRoute(null);
@@ -217,6 +293,10 @@ export function AnalysisPage() {
   const analyzeRoute = () => {
     const cleanFrom = fromPlace.trim() || state.fromCity;
     const cleanTo = toPlace.trim() || state.toCity;
+    if (!cleanFrom || !cleanTo) {
+      setAiRouteReport("Rota analizi için başlangıç ve varış noktası gir.");
+      return;
+    }
     setFromPlace(cleanFrom);
     setToPlace(cleanTo);
     setState((prev) => ({
@@ -246,7 +326,7 @@ export function AnalysisPage() {
       <section className="section route-intelligence reveal">
         <div className="section-heading">
           <span className="eyebrow">AI rota analizi</span>
-          <h2>Yer veya mekan yaz, robot yol risklerini ve araç uyumunu çıkarsın.</h2>
+          <h2>Yer veya mekan yaz, DriveWise yol risklerini ve araç uyumunu çıkarsın.</h2>
           <p>
             Başlangıç ve varış noktasına göre kaza riski, çalışma ihtimali, ücretli yollar,
             eğim, dağ yolu ve virajlı kesimler tek ekranda değerlendirilir.
@@ -416,238 +496,54 @@ export function AnalysisPage() {
         </div>
       </section>
 
-      <section id="analysis" className="section analysis reveal">
-        <div className="section-heading">
-          <span className="eyebrow">Kontrol özeti</span>
-          <h2>Rota, bagaj ve bütçe aynı kararda birleşiyor.</h2>
-        </div>
-        <div className="analysis-shell">
-          <div className="analysis-track glass">
-            <div className="analysis-progress">
-              <span style={{ width: progress }} />
-            </div>
-            <div className="analysis-steps">
-              {analysisStages.map((label, index) => {
-                const classes = ["analysis-step"];
-                if (index < analysisStep) classes.push("done");
-                if (index === analysisStep) classes.push("active");
-                return (
-                  <div key={label} className={classes.join(" ")}>
-                    {label}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-          <div className="analysis-map glass">
-            <div className="analysis-map-header">
-              <strong>Rota kontrolü</strong>
-              <span>{analysisVisible ? analysisStatus : "Canlı ön analiz"}</span>
-            </div>
-            <div className="analysis-route">
-              <div className="analysis-node" />
-              <div className="analysis-line" />
-              <div className="analysis-node end" />
-              <div className="analysis-car">🚙</div>
-            </div>
-            <div className="analysis-snippet">
-              {analysisVisible ? analysisSnippet : `${fromPlace} - ${toPlace} rotasında yol koşulları, ücretli geçişler ve araç uyumu ön analizde gösteriliyor.`}
-            </div>
-          </div>
-        </div>
-      </section>
-
       <section className="section results reveal">
         <div className="section-heading">
-          <span className="eyebrow">Karar özeti</span>
-          <h2>Öneri kartları kısa ve kontrol edilebilir.</h2>
-        </div>
-        <div className="agent-result-grid">
-          <article className="agent-result-card glass gemini-border">
-            <span className="eyebrow">Rota Analizi</span>
-            <p>{aiRecommendationLoading ? "Gemini JSON sonucu bekleniyor..." : aiRecommendation?.routeAnalysis || fallbackRouteReport}</p>
-          </article>
-          {[
-            ["En Uygun Araç", aiRecommendation?.bestVehicle],
-            ["Ekonomik Alternatif", aiRecommendation?.economicOption],
-            ["Konfor Alternatifi", aiRecommendation?.comfortOption],
-          ].map(([title, item]) => {
-            const matchedVehicle = findRecommendedVehicle(item);
-            return (
-              <article key={title} className="agent-result-card glass">
-                <span className="eyebrow">{title}</span>
-                <h3>{item?.name || matchedVehicle?.name || "Hesaplanıyor"}</h3>
-                {item?.score ? <div className="score">{item.score}/100 AI skoru</div> : null}
-                {matchedVehicle ? (
-                  <div className="mini-spec-row">
-                    <span>{matchedVehicle.segment}</span>
-                    <span>{matchedVehicle.fuel}</span>
-                    <span>₺{matchedVehicle.price}/gün</span>
-                    <span>{matchedVehicle.luggage} L</span>
-                  </div>
-                ) : null}
-                <p>{item?.reason || "Yerel agent skoru ve Gemini yanıtı birleştiriliyor."}</p>
-              </article>
-            );
-          })}
-          <article className="agent-result-card glass">
-            <span className="eyebrow">Dikkat Edilmesi Gerekenler</span>
-            <ul className="risk-list compact">
-              {(aiRecommendation?.warnings?.length ? aiRecommendation.warnings : buildRiskWarnings(top, state)).map((warning) => (
-                <li key={warning}>{warning}</li>
-              ))}
-            </ul>
-          </article>
-          <article className="agent-result-card glass gemini-border">
-            <span className="eyebrow">Neden Bu Araç?</span>
-            <p>{aiRecommendation?.summary || buildDecisionSummary(top, state)}</p>
-            <span className="source-pill">{aiRecommendation?.source === "gemini-json" ? "Gemini doğruladı" : "Yerel doğrulama"}</span>
-          </article>
+          <span className="eyebrow">DriveWise araç önerisi</span>
+          <h2>Yokuş, viraj, yol koşulu ve yol üstü olasılıklara göre 3 araç.</h2>
+          <p>
+            Öneriler rota analizindeki eğim, dağ/viraj, yol zemini, trafik, çalışma ve uzun yol
+            sinyallerine göre yeniden puanlanır.
+          </p>
         </div>
 
-        <div className="section-heading compact">
-          <span className="eyebrow">Araç öneri kartları</span>
-          <h2>3 ana seçenek hazır.</h2>
-        </div>
-        <div className="recommendation-grid">
-          {decisionCards.map(([highlight, item]) => {
-            const cost = estimateFuelCost(item.vehicle, state);
-            const luggage = getLuggageFit(item.vehicle, state);
-            return (
-              <article key={`${highlight}-${item.vehicle.id}`} className="recommendation-card">
-                <div className="vehicle-visual" style={{ marginBottom: 14 }}>
-                  {item.vehicle.imageUrl ? (
-                    <img
-                      src={item.vehicle.imageUrl}
-                      alt={item.vehicle.name}
-                    />
-                  ) : (
-                    item.vehicle.emoji
-                  )}
-                  <div className="badge">{highlight}</div>
+        <div className="recommendation-grid route-recommendation-grid">
+          {routeVehicleRecommendations.map(({ vehicle, score, reason }) => (
+            <article key={vehicle.id} className="recommendation-card route-recommendation-card">
+              <div className="vehicle-visual">
+                {vehicle.imageUrl ? <img src={vehicle.imageUrl} alt={vehicle.name} /> : vehicle.emoji}
+                <div className="badge">{vehicle.segment}</div>
+              </div>
+              <p className="route-ai-reason ai-insight-copy">
+                <span className="ai-sparkles" aria-hidden="true">
+                  <WandSparkles size={16} strokeWidth={2.4} />
+                </span>
+                {reason}
+              </p>
+              <h3>{vehicle.name}</h3>
+              <div className="score">{score}/100 rota uygunluğu</div>
+              <div className="recommendation-specs">
+                <div className="spec-row">
+                  <span>Performans</span>
+                  <strong>{vehicle.performance}/10</strong>
                 </div>
-                <h3>
-                  {item.vehicle.emoji} {item.vehicle.name}
-                </h3>
-                <div className="score">{item.score}/100 AI uygunluk</div>
-                <div className="recommendation-specs">
-                  <div className="spec-row">
-                    <span>Segment</span>
-                    <strong>{item.vehicle.segment}</strong>
-                  </div>
-                  <div className="spec-row">
-                    <span>Günlük fiyat</span>
-                    <strong>₺{item.vehicle.price}</strong>
-                  </div>
-                  <div className="spec-row">
-                    <span>Yakıt</span>
-                    <strong>{item.vehicle.fuel}</strong>
-                  </div>
-                  <div className="spec-row">
-                    <span>Bagaj</span>
-                    <strong>{item.vehicle.luggage} L</strong>
-                  </div>
-                  <div className="spec-row">
-                    <span>Kapasite</span>
-                    <strong>{item.vehicle.seats} kişi</strong>
-                  </div>
-                  <div className="spec-row">
-                    <span>Yakıt tahmini</span>
-                    <strong>₺{cost.fuel.toLocaleString("tr-TR")}</strong>
-                  </div>
-                  <div className="spec-row">
-                    <span>Bagaj uyumu</span>
-                    <strong>{luggage.label}</strong>
-                  </div>
+                <div className="spec-row">
+                  <span>Konfor</span>
+                  <strong>{vehicle.comfort}/10</strong>
                 </div>
-                <p className="details">{item.vehicle.notes}</p>
-              </article>
-            );
-          })}
+                <div className="spec-row">
+                  <span>Yol uyumu</span>
+                  <strong>{vehicle.routeFit.join(" · ")}</strong>
+                </div>
+                <div className="spec-row">
+                  <span>Tüketim</span>
+                  <strong>{vehicle.consumption} L/100km</strong>
+                </div>
+              </div>
+            </article>
+          ))}
         </div>
       </section>
 
-      <section className="section explain reveal">
-        <div className="decision-panel glass">
-          <div>
-            <span className="eyebrow">Açıklamalı AI karar alanı</span>
-            <h2>{top ? `${top.name} neden öne çıktı?` : "Neden bu araç önerildi?"}</h2>
-            <p>
-              Bu rota için {totalPassengers} yolcu, yaklaşık {luggageNeed} parça eşdeğeri bagaj ve
-              günlük ₺{Number(state.budget).toLocaleString("tr-TR")} bütçe hesaplandı. {top?.name} bagaj ve
-              yolcu dengesini korurken {getRouteLabel(state.routeType)} için daha güvenli ve dengeli bir seçenek sundu.
-            </p>
-          </div>
-          <div className="decision-tags">
-            <span>Rota: {state.routeType}</span>
-            <span>Öncelik: {state.priority}</span>
-            <span>Bütçe: ₺{Number(state.budget).toLocaleString("tr-TR")}/gün</span>
-            <span>Bagaj: {luggageNeed} eşdeğer</span>
-            <span>Yolcu: {totalPassengers}</span>
-          </div>
-        </div>
-        <div className="risk-panel glass">
-          <div className="risk-head">
-            <span className="eyebrow">Risk ve uyarılar</span>
-            <strong>Güven veren ama dürüst analiz</strong>
-          </div>
-          <ul className="risk-list">
-            {top && buildRiskWarnings(top, state).map((warning) => <li key={warning}>{warning}</li>)}
-          </ul>
-        </div>
-      </section>
-
-      <section className="section explain reveal">
-        <div className="decision-panel glass">
-          <div>
-            <span className="eyebrow">Son karar özeti</span>
-            <h2>Robotun net önerisi</h2>
-            <p>{buildDecisionSummary(top, state)}</p>
-          </div>
-        </div>
-        <div className="risk-panel glass">
-          <div className="risk-head">
-            <span className="eyebrow">Elendi</span>
-            <strong>Hangi araç neden geride kaldı?</strong>
-          </div>
-          <ul className="risk-list">
-            {eliminationNotes.map((note) => (
-              <li key={note.id}>
-                <strong>{note.name}:</strong> {note.reason}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </section>
-
-      <section className="section compare reveal">
-        <div className="section-heading">
-          <span className="eyebrow">Araç karşılaştırma</span>
-          <h2>Kriter bazlı tablo</h2>
-        </div>
-        <div className="compare-table-wrap glass">
-          <table className="compare-table">
-            <thead>
-              <tr>
-                <th>Kriter</th>
-                <th>{ranked[0]?.vehicle.name}</th>
-                <th>{ranked[1]?.vehicle.name}</th>
-                <th>{ranked[2]?.vehicle.name}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {comparisonMetrics.map(([label, key]) => (
-                <tr key={label}>
-                  <td>{label}</td>
-                  <td>{formatComparisonValue(ranked[0]?.vehicle[key], key)}</td>
-                  <td>{formatComparisonValue(ranked[1]?.vehicle[key], key)}</td>
-                  <td>{formatComparisonValue(ranked[2]?.vehicle[key], key)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
     </>
   );
 }

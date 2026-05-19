@@ -3,7 +3,7 @@ import { useTrip } from "../TripContext";
 
 export function Footer() {
   const { siteSettings } = useTrip();
-  const logoLabel = siteSettings.logoText?.trim() || siteSettings.siteName?.trim()?.slice(0, 1) || "R";
+  const logoLabel = siteSettings.logoText?.trim() || siteSettings.siteName?.trim()?.slice(0, 1) || "D";
 
   return (
     <footer className="site-footer">

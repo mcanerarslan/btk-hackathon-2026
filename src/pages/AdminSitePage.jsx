@@ -98,7 +98,7 @@ export function AdminSitePage() {
               type="text"
               value={siteForm.siteName}
               onChange={(e) => setSiteForm((prev) => ({ ...prev, siteName: e.target.value }))}
-              placeholder="TripAI"
+              placeholder="DriveWise"
             />
           </label>
           <label className="field">
@@ -107,7 +107,7 @@ export function AdminSitePage() {
               type="text"
               value={siteForm.logoText}
               onChange={(e) => setSiteForm((prev) => ({ ...prev, logoText: e.target.value }))}
-              placeholder="T"
+              placeholder="D"
             />
           </label>
           <label className="field">
@@ -116,7 +116,7 @@ export function AdminSitePage() {
               type="text"
               value={siteForm.headerTitle}
               onChange={(e) => setSiteForm((prev) => ({ ...prev, headerTitle: e.target.value }))}
-              placeholder="TripAI"
+              placeholder="DriveWise"
             />
           </label>
           <label className="field">
@@ -194,12 +194,12 @@ export function AdminSitePage() {
                 {headerLogo ? <img src={headerLogo} alt="" className="brand-image" /> : faviconLabel}
               </div>
               <div>
-                <strong>{siteForm.headerTitle || "TripAI"}</strong>
+                <strong>{siteForm.headerTitle || "DriveWise"}</strong>
                 <p>{siteForm.headerSubtitle || "AI destekli araç öneri platformu"}</p>
               </div>
             </div>
             <div className="admin-footer-preview">
-              <strong>{siteForm.siteName || "TripAI"}</strong>
+              <strong>{siteForm.siteName || "DriveWise"}</strong>
               <p>{siteForm.footerText || "AI destekli araç öneri ve seyahat planlama platformu."}</p>
               <span>{siteForm.footerLegal || "KVKK · Gizlilik · Kullanım Şartları"}</span>
               <span>{siteForm.footerNote || "Demo panel · login gerekmez"}</span>

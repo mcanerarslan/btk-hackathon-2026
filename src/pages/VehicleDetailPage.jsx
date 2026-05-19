@@ -9,7 +9,137 @@ import {
 } from "../data";
 import { useTrip } from "../TripContext";
 
-function normalizeVehicleInsight(text, fallbackText) {
+function formatRouteLabel(state) {
+  const from = state.fromCity?.trim();
+  const to = state.toCity?.trim();
+  if (from && to) return `${from} → ${to}`;
+  if (from || to) return from || to;
+  return "";
+}
+
+function formatBagNeed(state) {
+  const parts = [
+    state.largeBags > 0 ? `${state.largeBags} büyük valiz` : "",
+    state.mediumBags > 0 ? `${state.mediumBags} orta valiz` : "",
+    state.backpacks > 0 ? `${state.backpacks} sırt çantası` : "",
+  ].filter(Boolean);
+
+  return parts.length ? parts.join(", ") : "bagaj bilgisi girilmemiş";
+}
+
+function pickVariant(items, seed, offset = 0) {
+  return items[Math.abs(seed + offset) % items.length];
+}
+
+function buildLocalVehicleInsight(vehicle, state, route, variantSeed = Date.now()) {
+  const passengerCount = state.adults + state.children;
+  const estimatedBagNeed = state.largeBags * 120 + state.mediumBags * 70 + state.backpacks * 30;
+  const routeLabel = route || "rota bilgisi netleşmemiş kullanımda";
+  const routePhrase = route ? `${route} rotasında` : "rota bilgisi netleşmemiş kullanımda";
+  const bagText =
+    estimatedBagNeed > 0
+      ? vehicle.luggage >= estimatedBagNeed
+        ? pickVariant(
+            [
+              `${vehicle.luggage} L bagaj hacmi mevcut ${formatBagNeed(state)} ihtiyacını karşılamaya yakın görünüyor`,
+              `${formatBagNeed(state)} için ${vehicle.luggage} L bagaj tarafı genel olarak yeterli kalır`,
+              `bagaj tarafında ${vehicle.luggage} L hacim, ${formatBagNeed(state)} yükünü makul seviyede taşır`,
+            ],
+            variantSeed,
+            1,
+          )
+        : pickVariant(
+            [
+              `${vehicle.luggage} L bagaj hacmi ${formatBagNeed(state)} için sınıra yaklaşabilir`,
+              `${formatBagNeed(state)} planında ${vehicle.luggage} L bagaj dikkatli yerleşim gerektirebilir`,
+              `bagaj yükü artarsa ${vehicle.luggage} L hacim bu araçta kısıtlayıcı olabilir`,
+            ],
+            variantSeed,
+            2,
+          )
+      : pickVariant(
+          [
+            `${vehicle.luggage} L bagaj hacmi hafif ve orta yükler için değerlendirilebilir`,
+            `bagaj bilgisi girilmediği için ${vehicle.luggage} L hacmi hafif seyahat varsayımıyla yeterli sayılabilir`,
+            `${vehicle.luggage} L bagaj, günlük kullanım ve az eşyalı yolculuklarda pratik kalır`,
+          ],
+          variantSeed,
+          3,
+        );
+  const passengerText =
+    passengerCount > vehicle.seats
+      ? pickVariant(
+          [
+            `${passengerCount} kişi için ${vehicle.seats} koltuk yetersiz kalır`,
+            `${vehicle.seats} koltuk kapasitesi ${passengerCount} kişilik planı taşımaz`,
+            `yolcu sayısı ${passengerCount} ise bu araç koltuk tarafında uygun değildir`,
+          ],
+          variantSeed,
+          4,
+        )
+      : pickVariant(
+          [
+            `${vehicle.seats} koltuk kapasitesi ${passengerCount || "belirtilen"} kişi için yeterli görünüyor`,
+            `${passengerCount || "mevcut"} kişi için ${vehicle.seats} koltuklu kabin tarafında belirgin bir sorun görünmüyor`,
+            `koltuk kapasitesi ${vehicle.seats} kişi olduğu için yolcu tarafı makul kalıyor`,
+          ],
+          variantSeed,
+          5,
+        );
+  const driveText = pickVariant(
+    vehicle.performance >= 8
+      ? ["performans ve sollama rahatlığı güçlü", "motor tepkisi güçlü", "performans tarafında rahat hissettiren"]
+      : vehicle.performance >= 6
+        ? ["performans tarafı dengeli", "sürüş karakteri dengeli", "güç ve tüketim dengesi orta noktada"]
+        : ["performans tarafı daha sakin", "hızlanma beklentisini abartmayan", "sakin sürüşe daha uygun"],
+    variantSeed,
+    6,
+  );
+  const comfortText = pickVariant(
+    vehicle.comfort >= 8
+      ? ["uzun yolda konfor beklentisi yüksekse avantajlıdır", "konfor seviyesi uzun yol için güçlü bir artıdır", "rahatlık önceliğinde iyi bir puan toplar"]
+      : vehicle.comfort >= 6
+        ? ["konforu günlük kullanım için yeterli düzeydedir", "konfor tarafı temel beklentileri karşılar", "rahatlık seviyesi kısa ve orta rotalarda yeterli kalır"]
+        : ["konfor beklentisi yüksekse daha üst segment düşünülmelidir", "rahatlık tarafı temel seviyede kalır", "uzun yolda konfor hassasiyeti varsa sınırlı kalabilir"],
+    variantSeed,
+    7,
+  );
+  const routeFitText =
+    vehicle.routeFit.includes(state.routeType) || vehicle.routeFit.includes("mixed")
+      ? pickVariant(
+          [
+            `${routeLabel} ve ${state.routeType} yol tipiyle uyumu makul`,
+            `${state.routeType} yol tipinde kullanım profili katalog verisiyle çelişmiyor`,
+            `${routeLabel} için rota uyumu kabul edilebilir seviyede`,
+          ],
+          variantSeed,
+          8,
+        )
+      : pickVariant(
+          [
+            `${routeLabel} için yol tipi uyumu ayrıca kontrol edilmeli`,
+            `${state.routeType} yol tipi bu araçta ekstra dikkat gerektirebilir`,
+            `${routeLabel} planında rota koşulları netleşmeden kesin öneri vermek doğru olmaz`,
+          ],
+          variantSeed,
+          9,
+        );
+  const consumptionText =
+    vehicle.consumption > 0
+      ? `${vehicle.consumption} L/100km tüketim`
+      : `${vehicle.fuel.toLowerCase()} kullanım`;
+
+  const templates = [
+    `${vehicle.name}, ${routePhrase} ${driveText} bir seçenek; ${routeFitText}. ${bagText} ve ${passengerText}. ${consumptionText}, ₺${vehicle.price.toLocaleString("tr-TR")} günlük fiyat ve ${comfortText}; bu yüzden bütçe, bagaj ve yol tipine göre karar verilmelidir.`,
+    `${routePhrase} ${vehicle.name} daha çok ${driveText} karakteriyle öne çıkar. ${bagText}; ayrıca ${passengerText}. ${consumptionText} ve ₺${vehicle.price.toLocaleString("tr-TR")} günlük fiyat dengesi iyi okunmalı, ${comfortText}.`,
+    `${vehicle.name} için ana tablo şöyle: ${routeFitText}, sürüşte ise ${driveText} bir yapı var. ${bagText} ve ${passengerText}. Yakıt/fiyat tarafında ${consumptionText} ile ₺${vehicle.price.toLocaleString("tr-TR")} günlük bedel birlikte değerlendirilmeli; ${comfortText}.`,
+    `${vehicle.name}, ${routePhrase} bütçe ve pratiklik odaklı bakıldığında değerlendirilebilir. ${consumptionText} ve ₺${vehicle.price.toLocaleString("tr-TR")} günlük fiyat avantaj yaratırken ${bagText}. Son karar için ${passengerText}; ${comfortText}.`,
+  ];
+
+  return pickVariant(templates, variantSeed, 10);
+}
+
+function normalizeVehicleInsight(text, fallbackText, currentVehicle, vehicles = []) {
   const cleaned = String(text || "")
     .replace(/^#{1,6}\s*/gm, "")
     .replace(/\*\*/g, "")
@@ -23,8 +153,12 @@ function normalizeVehicleInsight(text, fallbackText) {
     openParenCount > closeParenCount ||
     /[\s(:\-–—,]$/.test(cleaned) ||
     /^.+değerlendirmesi\s*\(?$/i.test(cleaned);
+  const mentionsOtherVehicle = vehicles.some((vehicle) => {
+    if (!currentVehicle || vehicle.id === currentVehicle.id) return false;
+    return cleaned.toLocaleLowerCase("tr-TR").includes(vehicle.name.toLocaleLowerCase("tr-TR"));
+  });
 
-  return looksBroken ? fallbackText : cleaned;
+  return looksBroken || mentionsOtherVehicle ? fallbackText : cleaned;
 }
 
 export function VehicleDetailPage() {
@@ -77,6 +211,12 @@ export function VehicleDetailPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  useEffect(() => {
+    setAiOpen(false);
+    setAiInsight("");
+    setAiLoading(false);
+  }, [vehicleId]);
+
   if (!vehicle) {
     return <Navigate to="/vehicles" replace />;
   }
@@ -87,6 +227,12 @@ export function VehicleDetailPage() {
   const bars = getVehicleTechnicalBars(vehicle);
   const suitabilityScore = computeScore(vehicle, state);
   const totalPassengers = state.adults + state.children;
+  const decisionSummaryReady =
+    Boolean(state.fromCity?.trim()) &&
+    Boolean(state.toCity?.trim()) &&
+    Boolean(state.departureDate) &&
+    Boolean(state.returnDate) &&
+    totalPassengers > 0;
   const tripDays = Math.max(
     1,
     Math.ceil(
@@ -116,22 +262,43 @@ export function VehicleDetailPage() {
     setAiOpen(true);
     setAiLoading(true);
     setAiInsight("Gemini yanıtlıyor...");
-    const route = `${state.fromCity} → ${state.toCity}`;
-    const localFallback = [
-      `${vehicle.name}, ${route} rotası için ${vehicle.performance >= 7 ? "performans tarafında yeterli" : "performans tarafında daha sakin"} bir seçenek.`,
-      `${vehicle.luggage} L bagaj ve ${vehicle.seats} koltuk kapasitesiyle yolcu/bagaj ihtiyacı makulse tercih edilebilir.`,
-      `${vehicle.consumption} L/100km tüketim ve ₺${vehicle.price} günlük fiyatıyla karar verirken bütçe ve yol tipini birlikte değerlendirmek gerekir.`,
-    ].join(" ");
+    const route = formatRouteLabel(state);
+    const variationKey = Date.now() + Math.floor(Math.random() * 1000);
+    const localFallback = buildLocalVehicleInsight(vehicle, state, route, variationKey);
 
     const prompt = [
-      `${vehicle.name} aracını bu seyahat için değerlendir.`,
+      "Aşağıdaki tek aracı mevcut seyahat için değerlendir.",
+      `Bu yanıt yalnızca ${vehicle.name} için yazılacak; başka araç adı yazma veya önceki araç metnini tekrar etme.`,
+      `Bu denemenin varyasyon kimliği: ${variationKey}. Bu kimliği metinde yazma; sadece farklı cümle yapısı ve farklı başlangıç seçmek için kullan.`,
+      "Aynı araç için önceki yanıt kalıbını tekrar etme; anlam aynı kalsa bile cümle sırası ve ifade farklı olsun.",
       "Kısa ama açıklayıcı ol.",
       "Selamlama, kapanış sözü veya anlamsız ek metin yazma.",
       "Markdown başlığı, kalın yazı, parantezli başlık veya liste kullanma.",
       "Yanıt 3 kısa cümleden oluşsun ve mutlaka tamamlanmış cümlelerle bitsin.",
       "Artıları, eksileri ve bu rota için uygunluğunu söyle.",
       "Varsa net bir öneri ver.",
-      `Araç bilgisi: segment ${vehicle.segment}, fiyat ₺${vehicle.price}, yakıt ${vehicle.fuel}, tüketim ${vehicle.consumption} L/100km, bagaj ${vehicle.luggage} L, koltuk ${vehicle.seats}, konfor ${vehicle.comfort}/10, performans ${vehicle.performance}/10.`,
+      "",
+      `Rota: ${route}`,
+      `Yol tipi: ${state.routeType}`,
+      `Öncelik: ${state.priority}`,
+      `Yolcu: ${totalPassengers} kişi`,
+      `Bagaj ihtiyacı: ${formatBagNeed(state)}`,
+      `Bütçe: ${state.budget || "belirtilmedi"} TL/gün`,
+      "",
+      `Araç adı: ${vehicle.name}`,
+      `Segment: ${vehicle.segment}`,
+      `Kategori: ${vehicle.category}`,
+      `Segment etiketi: ${vehicle.segmentTag}`,
+      `Fiyat: ₺${vehicle.price}/gün`,
+      `Yakıt: ${vehicle.fuel}`,
+      `Vites: ${vehicle.transmission || "Otomatik"}`,
+      `Tüketim: ${vehicle.consumption} L/100km`,
+      `Bagaj: ${vehicle.luggage} L`,
+      `Koltuk: ${vehicle.seats}`,
+      `Konfor: ${vehicle.comfort}/10`,
+      `Performans: ${vehicle.performance}/10`,
+      `Uygun rota etiketleri: ${vehicle.routeFit.join(", ")}`,
+      `Not: ${vehicle.notes}`,
     ].join(" ");
 
     const result = await askGemini(prompt, {
@@ -144,7 +311,7 @@ export function VehicleDetailPage() {
       returnResult: true,
     });
 
-    setAiInsight(normalizeVehicleInsight(result.text, localFallback));
+    setAiInsight(normalizeVehicleInsight(result.text, localFallback, vehicle, vehicles));
     setAiLoading(false);
   };
 
@@ -250,28 +417,30 @@ export function VehicleDetailPage() {
 
       <div className="detail-layout">
         <main className="detail-main">
-          <section className="detail-card glass">
-            <div className="detail-section-title">
-              <span className="eyebrow">Karar özeti</span>
-              <h3>Bu araç seyahate ne kadar uyuyor?</h3>
-            </div>
-            <div className="decision-summary-grid">
-              {decisionItems.map(([label, value]) => (
-                <div key={label} className="decision-summary-item">
-                  <span>{label}</span>
-                  <strong>{value}</strong>
-                </div>
-              ))}
-            </div>
-            <div className="detail-note">
-              <strong>{vehicle.notes}</strong>
-              <ul className="risk-list compact">
-                {warnings.map((warning) => (
-                  <li key={warning}>{warning}</li>
+          {decisionSummaryReady ? (
+            <section className="detail-card glass">
+              <div className="detail-section-title">
+                <span className="eyebrow">Karar özeti</span>
+                <h3>Bu araç seyahate ne kadar uyuyor?</h3>
+              </div>
+              <div className="decision-summary-grid">
+                {decisionItems.map(([label, value]) => (
+                  <div key={label} className="decision-summary-item">
+                    <span>{label}</span>
+                    <strong>{value}</strong>
+                  </div>
                 ))}
-              </ul>
-            </div>
-          </section>
+              </div>
+              <div className="detail-note">
+                <strong>{vehicle.notes}</strong>
+                <ul className="risk-list compact">
+                  {warnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            </section>
+          ) : null}
 
           <section className="detail-card glass">
             <div className="detail-section-title">
@@ -300,33 +469,6 @@ export function VehicleDetailPage() {
               ))}
             </div>
           </section>
-
-          <section className="detail-card glass">
-            <div className="detail-section-title">
-              <span className="eyebrow">Görseller</span>
-              <h3>Araç görünümü</h3>
-            </div>
-            <div className="detail-gallery">
-              {galleryShots.map((shot, index) => (
-                <button
-                  key={shot.title}
-                  className="detail-gallery-card"
-                  type="button"
-                  onClick={() => setLightboxIndex(index)}
-                >
-                  <span className="detail-gallery-media">
-                    {shot.image ? (
-                      <img src={shot.image} alt={shot.title} />
-                    ) : (
-                      <span className="detail-gallery-fallback">{shot.fallback}</span>
-                    )}
-                  </span>
-                  <strong>{shot.title}</strong>
-                </button>
-              ))}
-            </div>
-          </section>
-
           <section ref={compareRef} id="compare-section" className="detail-card glass">
             <div className="detail-section-title">
               <span className="eyebrow">Alternatifler</span>

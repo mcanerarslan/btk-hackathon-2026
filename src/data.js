@@ -383,26 +383,26 @@ export const stepLabels = ["1. Rota", "2. Yol tipi", "3. Yolcu", "4. Bagaj", "5.
 
 export const initialState = {
   step: 1,
-  routeType: "long",
-  priority: "economy",
-  budget: 2500,
-  budgetMin: 1500,
-  purpose: "longTrip",
-  fuelPriority: "economic",
-  comfortPriority: "high",
-  vehiclePreference: "suv",
-  adults: 4,
-  children: 1,
-  seats: 1,
-  largeBags: 4,
-  mediumBags: 2,
-  backpacks: 2,
-  oversize: true,
+  routeType: "",
+  priority: "",
+  budget: "",
+  budgetMin: "",
+  purpose: "",
+  fuelPriority: "",
+  comfortPriority: "",
+  vehiclePreference: "",
+  adults: 0,
+  children: 0,
+  seats: 0,
+  largeBags: 0,
+  mediumBags: 0,
+  backpacks: 0,
+  oversize: false,
   filter: "all",
-  fromCity: "İstanbul",
-  toCity: "Rize",
-  departureDate: "2026-06-12",
-  returnDate: "2026-06-18",
+  fromCity: "",
+  toCity: "",
+  departureDate: "",
+  returnDate: "",
 };
 
 export function clamp(value, min, max) {
@@ -410,6 +410,7 @@ export function clamp(value, min, max) {
 }
 
 function routeBoost(vehicle, routeType) {
+  if (!routeType) return 0;
   const fitsRoute = vehicle.routeFit.includes(routeType);
   if (fitsRoute) return 18;
   if (routeType === "mixed" && vehicle.routeFit.includes("long")) return 10;
@@ -422,22 +423,42 @@ function routeTypeBonusForOutdoor(vehicle) {
   return vehicle.routeFit.includes("outdoor") ? 12 : 0;
 }
 
+function toNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function getLuggageNeedLitres(state) {
+  return (
+    toNumber(state.largeBags) * 95 +
+    toNumber(state.mediumBags) * 65 +
+    toNumber(state.backpacks) * 28 +
+    (state.oversize ? 90 : 0)
+  );
+}
+
 export function computeScore(vehicle, state) {
-  const totalPassengers = state.adults + state.children;
-  const luggageNeed = state.largeBags * 3 + state.mediumBags * 2 + state.backpacks;
+  const totalPassengers = toNumber(state.adults) + toNumber(state.children);
+  const luggageNeed = getLuggageNeedLitres(state);
+  const budget = toNumber(state.budget, 0);
+  const budgetMin = toNumber(state.budgetMin, 0);
   let score = 50;
 
   score += routeBoost(vehicle, state.routeType);
-  score += vehicle.seats >= totalPassengers ? 12 : -18;
-  score += vehicle.luggage >= luggageNeed * 35 ? 14 : vehicle.luggage >= luggageNeed * 25 ? 6 : -14;
+  if (totalPassengers > 0) {
+    score += vehicle.seats >= totalPassengers ? 12 : -24;
+  }
+  if (luggageNeed > 0) {
+    score += vehicle.luggage >= luggageNeed * 1.15 ? 14 : vehicle.luggage >= luggageNeed * 0.9 ? 6 : -18;
+  }
 
   if (state.priority === "economy") {
     score += Math.max(0, 16 - vehicle.price / 500);
-    score += vehicle.consumption < 5.5 ? 10 : 0;
+    score += vehicle.consumption > 0 && vehicle.consumption < 5.5 ? 10 : vehicle.fuel === "Elektrik" ? 12 : 0;
   }
-  if (state.budget && vehicle.price > state.budget) {
-    score -= Math.min(24, Math.round((vehicle.price - state.budget) / 120));
-  } else if (state.budget && vehicle.price <= state.budget) {
+  if (budget && vehicle.price > budget) {
+    score -= Math.min(24, Math.round((vehicle.price - budget) / 120));
+  } else if (budget && vehicle.price <= budget) {
     score += 6;
   }
   if (state.priority === "balanced") {
@@ -463,8 +484,8 @@ export function computeScore(vehicle, state) {
   if (state.fuelPriority === "performance" && vehicle.performance >= 8) score += 7;
   if (state.comfortPriority === "high") score += vehicle.comfort >= 8 ? 8 : -4;
   if (state.comfortPriority === "medium") score += vehicle.comfort >= 7 ? 4 : 0;
-  if (state.comfortPriority === "low" && vehicle.price <= state.budget) score += 3;
-  if (state.budgetMin && vehicle.price < state.budgetMin) score -= 2;
+  if (state.comfortPriority === "low" && budget && vehicle.price <= budget) score += 3;
+  if (budgetMin && vehicle.price < budgetMin) score -= 2;
   if (state.vehiclePreference && state.vehiclePreference !== "any") {
     const searchable = `${vehicle.name} ${vehicle.segment} ${vehicle.segmentTag} ${vehicle.fuel} ${vehicle.transmission}`.toLocaleLowerCase("tr-TR");
     if (state.vehiclePreference === "automatic" && vehicle.transmission === "Otomatik") score += 7;
@@ -473,7 +494,7 @@ export function computeScore(vehicle, state) {
     else if (searchable.includes(state.vehiclePreference.toLocaleLowerCase("tr-TR"))) score += 7;
   }
 
-  if (state.oversize && vehicle.luggage < luggageNeed * 30) score -= 18;
+  if (state.oversize && vehicle.luggage < luggageNeed) score -= 18;
   if (state.routeType === "winter" && vehicle.segmentTag === "suv") score += 12;
   if (state.routeType === "mountain" && vehicle.performance >= 7) score += 8;
 
@@ -482,8 +503,8 @@ export function computeScore(vehicle, state) {
 
 export function buildRiskWarnings(vehicle, state) {
   const warnings = [];
-  const totalPassengers = state.adults + state.children;
-  const luggageNeed = state.largeBags * 3 + state.mediumBags * 2 + state.backpacks;
+  const totalPassengers = toNumber(state.adults) + toNumber(state.children);
+  const luggageNeed = getLuggageNeedLitres(state);
 
   if (state.routeType === "mountain" && vehicle.performance < 7) {
     warnings.push("Bu rota için düşük motor gücü yetersiz kalabilir.");
@@ -494,8 +515,8 @@ export function buildRiskWarnings(vehicle, state) {
   if (vehicle.seats < totalPassengers) {
     warnings.push("Koltuk kapasitesi yolcu sayısına göre sınırda kalıyor.");
   }
-  if (vehicle.luggage < luggageNeed * 30) {
-    warnings.push("Bagaj kapasitesi eşyalar için yetersiz olabilir.");
+  if (luggageNeed > 0 && vehicle.luggage < luggageNeed * 0.9) {
+    warnings.push(`Bagaj kapasitesi yaklaşık ${luggageNeed} L ihtiyaca göre yetersiz kalabilir.`);
   }
   if (!warnings.length) {
     warnings.push("Seçilen araç bu rota için dengeli görünüyor.");
@@ -513,19 +534,67 @@ export function formatComparisonValue(value, key) {
 }
 
 export function assistantReply(question, state, topVehicle, currentRoute) {
+  const normalizedQuestion = question.toLocaleLowerCase("tr-TR");
+  const hasRoute = Boolean(state.fromCity?.trim() && state.toCity?.trim());
+  const routeText = hasRoute ? `${state.fromCity.trim()} → ${state.toCity.trim()}` : "";
+  const passengerCount = state.adults + state.children;
+  const hasPassengerInfo = passengerCount > 0;
+  const hasLuggageInfo = state.largeBags > 0 || state.mediumBags > 0 || state.backpacks > 0;
+  const needParts = [
+    hasPassengerInfo ? `${passengerCount} kişi` : "",
+    state.largeBags > 0 ? `${state.largeBags} büyük valiz` : "",
+    state.mediumBags > 0 ? `${state.mediumBags} orta valiz` : "",
+    state.backpacks > 0 ? `${state.backpacks} sırt çantası` : "",
+  ].filter(Boolean);
+  const needText = needParts.length ? needParts.join(", ") : "kişi ve bagaj bilgisi";
+
+  if (/^(selam|merhaba|mrb|hey|iyi günler|iyi gunler)\b/i.test(normalizedQuestion)) {
+    return "Merhaba, buradayım. İstersen direkt nasıl bir yolculuk planladığını yaz; kişi, bagaj ve bütçeye göre filodaki araçları birlikte daraltalım.";
+  }
+  if (/^(teşekkür|tesekkur|sağ ol|sag ol|eyvallah)/i.test(normalizedQuestion)) {
+    return "Rica ederim. Aklında bir araç varsa adını yaz, yoksa kullanım amacını söyle; ona göre daha net yönlendireyim.";
+  }
+  if (/(ne yapabilirsin|nasıl yardımcı|nasil yardimci|kimsin)/i.test(normalizedQuestion)) {
+    return "Filodaki araçları fiyat, yakıt, konfor, bagaj ve rota ihtiyacına göre yorumlayabiliyorum. Günlük kullanım mı, uzun yol mu, kalabalık aile mi; onu yazman yeterli.";
+  }
+  if (/konfor|rahat|premium/i.test(question)) {
+    return "Konfor tarafında BMW 3 Serisi, Peugeot 3008, Audi A4, Tesla Model Y ve Hyundai Staria öne çıkıyor. Daha dengeli bütçede Toyota Corolla, Skoda Octavia, Volkswagen Passat ve Mercedes Vito da rahat seçenekler.";
+  }
+  if (/(neden|niye|seç|sec|tercih)/i.test(question) && topVehicle) {
+    const priceText = `günlük ₺${topVehicle.price.toLocaleString("tr-TR")}`;
+    const consumptionText =
+      topVehicle.consumption > 0 ? `${topVehicle.consumption} L/100km tüketim` : "elektrikli kullanım";
+    const routeNote = hasRoute
+      ? ` ${routeText} hattı için yol tipi ve bagaj ihtiyacını ayrıca kontrol etmek gerekir.`
+      : " Rota netleşirse yol şartına göre son kontrolü yapmak gerekir.";
+
+    return `${topVehicle.name} seçmek için temel gerekçe: ${topVehicle.segment.toLowerCase()} sınıfında ${priceText} fiyat, ${consumptionText}, ${topVehicle.seats} kişilik kabin ve ${topVehicle.luggage} L bagaj sunuyor. ${topVehicle.notes} Şehir içi veya hafif bagajlı kullanımda mantıklı bir tercih olur.${routeNote}`;
+  }
   if (/uygun/i.test(question) && topVehicle) {
-    return `${topVehicle.name} bu rota için güçlü aday. ${currentRoute} hattında bagaj ve kişi sayısı uyumluysa öneririm.`;
+    if (!hasRoute) {
+      if (!hasPassengerInfo && !hasLuggageInfo) {
+        return `${topVehicle.name} genel kullanım için mantıklı bir aday. Daha net konuşmam için sadece kaç kişi gideceğini, bagaj durumunu ve şehir içi mi uzun yol mu kullanacağını yazman yeterli.`;
+      }
+      return `${needText} için ${topVehicle.name} değerlendirilebilir. Rota da belli olursa yol şartı tarafında daha net “olur/olmaz” diyebilirim.`;
+    }
+    return `${topVehicle.name} ${routeText} hattı için güçlü aday. Bagaj ve kişi sayısı uyumluysa öneririm.`;
   }
   if (/valiz|bagaj/i.test(question)) {
+    if (!hasLuggageInfo) {
+      return "Bagaj miktarı belirtilmediği için net hacim yorumu yapamam. Kaç büyük valiz, orta valiz veya sırt çantası olduğunu yazarsan uygun bagaj hacmine göre araç önerebilirim.";
+    }
     return `Mevcut formda bagaj yükü belirgin. ${state.largeBags} büyük valiz ve ${state.mediumBags} orta valiz nedeniyle SUV veya minivan daha güvenli.`;
   }
-  if (/ekonom/i.test(question)) {
-    return "Ekonomik tarafta Fiat Egea Cross ve Toyota Corolla öne çıkıyor. Düşük tüketim ve makul günlük ücret sunuyorlar.";
+  if (/ekonom|az yak|yakıt|yakit|tasarruf|ucuz|bütçe|butce/i.test(question)) {
+    return "Ekonomik ve az yakan seçeneklerde Toyota Corolla, Renault Clio, Opel Corsa ve Hyundai i20 öne çıkıyor. Şehir içi ve düşük bütçe için Corsa/Clio, daha dengeli tüketim ve konfor için Corolla daha mantıklı.";
   }
   if (/dağ|yayla|yol/i.test(question)) {
     return "Dağ ve yayla rotası için Dacia Duster veya Peugeot 3008 daha uygun. Yerden yükseklik ve motor gücü önemli.";
   }
-  return "Bu rota için yol tipi, kişi sayısı ve bagaj birlikte değerlendirilmeli. İstersen analiz ekranını açıp açıklamalı önerileri görebilirsin.";
+  if (!hasRoute) {
+    return "Bunu araç seçimi açısından yorumlayabilirim. Bana kullanım şeklini biraz açarsan filodan mantıklı seçenekleri söyleyeyim: şehir içi mi, uzun yol mu, kaç kişi ve yaklaşık ne kadar bagaj var?";
+  }
+  return `${routeText} için bunu araç seçimi tarafında düşünürsek yol tipi, kişi sayısı ve bagaj belirleyici olur. İstersen bu bilgilerle filodaki en uygun seçenekleri sıralayabilirim.`;
 }
 
 export function buildVehicleSummary(vehicle, variantKey = 0) {

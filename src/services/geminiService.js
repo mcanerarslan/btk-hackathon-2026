@@ -7,6 +7,54 @@ const USE_DEV_GEMINI_PROXY = import.meta.env.DEV;
 const GEMINI_ENDPOINT = USE_DEV_GEMINI_PROXY
   ? "/api/gemini"
   : `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const RETRYABLE_GEMINI_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+class GeminiApiError extends Error {
+  constructor(status, detail) {
+    super(`Gemini API error: ${status}${detail ? ` - ${detail}` : ""}`);
+    this.name = "GeminiApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function getRetryDelay(response, attempt) {
+  const retryAfter = Number(response.headers.get("retry-after") || 0);
+  if (retryAfter > 0) return Math.min(retryAfter * 1000, 3000);
+  return attempt === 0 ? 700 : 1400;
+}
+
+function isRetryableGeminiError(error) {
+  return RETRYABLE_GEMINI_STATUSES.has(Number(error?.status));
+}
+
+export function getGeminiUserMessage(error) {
+  const message = typeof error === "string" ? error : error?.message || "";
+
+  if (/missing-api-key/i.test(message)) {
+    return "Gemini API anahtarı bulunamadı; yerel öneri motoru devrede.";
+  }
+
+  if (/Gemini API error:\s*(429|503)|high demand|RESOURCE_EXHAUSTED|UNAVAILABLE/i.test(message)) {
+    return "Gemini şu anda yoğun. Yerel öneri motoru devrede; biraz sonra tekrar deneyebilirsin.";
+  }
+
+  if (/Gemini API error:\s*(500|502|504)/i.test(message)) {
+    return "Gemini geçici olarak yanıt veremedi. Yerel öneri motoru devrede.";
+  }
+
+  if (/invalid-json|invalid-gemini-text/i.test(message)) {
+    return "Gemini yanıtı doğrulanamadı; yerel öneri motoru devrede.";
+  }
+
+  return message ? "Gemini yanıtı alınamadı; yerel öneri motoru devrede." : "";
+}
 
 export function getGeminiStatus() {
   return {
@@ -76,6 +124,8 @@ function hasBrokenFormatting(text) {
   if (openParenCount > closeParenCount) return true;
   if (/[\s(:\-–—,]$/.test(cleaned)) return true;
   if (/^\*\*[^*]+$/.test(cleaned)) return true;
+  if (/^\*\*[^*]+:\*\*$/.test(cleaned)) return true;
+  if (/^[^.!?]+:\s*$/.test(cleaned)) return true;
 
   return false;
 }
@@ -83,6 +133,11 @@ function hasBrokenFormatting(text) {
 function isUsableGeminiText(text) {
   const cleaned = cleanGeminiText(text);
   if (cleaned.length < 20) return false;
+  const withoutMarkdown = cleaned.replace(/\*\*/g, "").trim();
+  if (/^kullan[ıi]c[ıi]\s+(sorusu|talebi)\s*:/i.test(withoutMarkdown)) return false;
+  if (/^(rota|yolcu say[ıi]s[ıi]|bagaj|bebek koltu[gğ]u|yol tipi|[oö]ncelik|g[uü]nl[uü]k b[uü]t[cç]e|[oö]nerilen ara[cç]|segment|fiyat|yak[ıi]t|t[uü]ketim|koltuk|konfor|performans|not)\s*:/i.test(withoutMarkdown)) {
+    return false;
+  }
   if (/\b(by\s+bybe|bybe|anq)\b/i.test(cleaned)) return false;
   if (/([a-zçğıöşü])\1{4,}/i.test(cleaned)) return false;
   if (hasBrokenFormatting(cleaned)) return false;
@@ -107,10 +162,12 @@ export function buildTripAssistantPrompt(question, state, topVehicle, currentRou
     : "Onerilen arac: yok";
 
   return [
-    "Sen Gemini destekli bir rent a car ve rota karar uzmanisin.",
+    "Sen Gemini destekli DriveWise rota ve araç seçim uzmanisin.",
     "Yanitini Turkce ver.",
-    "Kisa, net ve aciklamali cevap ver.",
-    "Selamlama, kapanis sozu veya anlamsiz ek metin yazma.",
+    "Gundelik, dogal ve kisa konus; musteri temsilcisi gibi sakin ve net cevap ver.",
+    "Markdown basligi, kalin yazi, etiketli alan veya 'Kullanici talebi' gibi prompt tekrari yazma.",
+    "Kullanici selam verirse kisa karsilik ver; gereksiz kapanis sozu yazma.",
+    "Soru arac kiralama disindaysa konuyu nazikce filo, rota, bagaj, butce veya rezervasyon baglamina bagla.",
     "Kullaniciya arac onerirken rota, yolcu, bagaj ve butce verisine dayan.",
     "Uydurma veri ekleme. Belirsiz kisimlari varsayim olarak belirt.",
     "",
@@ -145,7 +202,7 @@ export function buildStructuredRecommendationPrompt(state, vehicles, localRecomm
     }));
 
   return [
-    "Sen Gemini destekli AI Rent A Car ve Akilli Rota Asistani icin karar veren uzman agentsin.",
+    "Sen Gemini destekli DriveWise Akilli Rota Asistani icin karar veren uzman agentsin.",
     "Yalnizca gecerli JSON dondur. Markdown, aciklama, kod blogu veya selamlama yazma.",
     "Verilen arac katalogu disinda arac uydurma.",
     "Yaniti Turkce yaz.",
@@ -190,10 +247,15 @@ export function buildStructuredRecommendationPrompt(state, vehicles, localRecomm
   ].join("\n");
 }
 
-async function fetchGeminiText(prompt, maxOutputTokens = 320) {
-  if (!GEMINI_API_KEY) return null;
+async function requestGeminiText(prompt, maxOutputTokens, attempt, options = {}) {
+  const generationConfig = {
+    temperature: options.temperature ?? 0.35,
+    maxOutputTokens,
+  };
 
-  console.info(`[AI] Gemini calistiriliyor: ${GEMINI_MODEL}`);
+  if (options.responseMimeType) {
+    generationConfig.responseMimeType = options.responseMimeType;
+  }
 
   const response = await fetch(GEMINI_ENDPOINT, {
     method: "POST",
@@ -210,10 +272,7 @@ async function fetchGeminiText(prompt, maxOutputTokens = 320) {
           parts: [{ text: prompt }],
         },
       ],
-      generationConfig: {
-        temperature: 0.35,
-        maxOutputTokens,
-      },
+      generationConfig,
     }),
   });
 
@@ -225,15 +284,34 @@ async function fetchGeminiText(prompt, maxOutputTokens = 320) {
     } catch {
       errorDetail = "";
     }
-    throw new Error(`Gemini API error: ${response.status}${errorDetail ? ` - ${errorDetail}` : ""}`);
+
+    const error = new GeminiApiError(response.status, errorDetail);
+    if (attempt < 2 && isRetryableGeminiError(error)) {
+      await wait(getRetryDelay(response, attempt));
+      return requestGeminiText(prompt, maxOutputTokens, attempt + 1, options);
+    }
+
+    throw error;
   }
 
-  const payload = await response.json();
+  return response.json();
+}
+
+async function fetchGeminiText(prompt, maxOutputTokens = 320, options = {}) {
+  if (!GEMINI_API_KEY && !USE_DEV_GEMINI_PROXY) return null;
+
+  console.info(`[AI] Gemini calistiriliyor: ${GEMINI_MODEL}`);
+  const payload = await requestGeminiText(prompt, maxOutputTokens, 0, options);
   console.info("[AI] Gemini yaniti alindi");
   const finishReason = payload?.candidates?.[0]?.finishReason || "";
   const text = cleanGeminiText(extractGeminiText(payload));
 
-  if (isUsableGeminiText(text)) return text;
+  if (finishReason === "MAX_TOKENS") {
+    console.warn("[AI] Gemini metni token limiti nedeniyle kesildi");
+    return null;
+  }
+
+  if (options.validate === false || isUsableGeminiText(text)) return text;
 
   console.warn(
     `[AI] Gemini metni kullanilamadi: finishReason=${finishReason || "unknown"} length=${text.length}`,
@@ -258,13 +336,13 @@ export async function sendTripQuestion({ question, state, topVehicle, currentRou
   }
 }
 
-export async function generateGeminiText(prompt, fallbackText, maxOutputTokens = 420) {
-  if (!GEMINI_API_KEY) {
+export async function generateGeminiText(prompt, fallbackText, maxOutputTokens = 420, options = {}) {
+  if (!GEMINI_API_KEY && !USE_DEV_GEMINI_PROXY) {
     return { text: fallbackText, source: "fallback", error: "missing-api-key" };
   }
 
   try {
-    const text = await fetchGeminiText(prompt, maxOutputTokens);
+    const text = await fetchGeminiText(prompt, maxOutputTokens, options);
     return { text: text || fallbackText, source: text ? "gemini" : "fallback", error: text ? "" : "invalid-gemini-text" };
   } catch (error) {
     console.warn(`[AI] Gemini fallback kullanildi: ${error.message}`);
