@@ -1,20 +1,46 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, useParams } from "react-router-dom";
+import { ArrowLeft, CalendarCheck, ChevronLeft, ChevronRight, Scale, Sparkles, X } from "lucide-react";
 import {
   buildRiskWarnings,
   buildVehicleSummary,
+  computeScore,
   getVehicleTechnicalBars,
 } from "../data";
 import { useTrip } from "../TripContext";
 
+function normalizeVehicleInsight(text, fallbackText) {
+  const cleaned = String(text || "")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/\*\*/g, "")
+    .replace(/^[-*]\s+/gm, "")
+    .trim();
+
+  const openParenCount = (cleaned.match(/\(/g) || []).length;
+  const closeParenCount = (cleaned.match(/\)/g) || []).length;
+  const looksBroken =
+    cleaned.length < 60 ||
+    openParenCount > closeParenCount ||
+    /[\s(:\-–—,]$/.test(cleaned) ||
+    /^.+değerlendirmesi\s*\(?$/i.test(cleaned);
+
+  return looksBroken ? fallbackText : cleaned;
+}
+
 export function VehicleDetailPage() {
   const { vehicleId } = useParams();
-  const { vehicles, state, askGemini } = useTrip();
+  const { vehicles, state, askGemini, createReservation } = useTrip();
   const [aiOpen, setAiOpen] = useState(false);
   const [aiInsight, setAiInsight] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(null);
   const [compareId, setCompareId] = useState(null);
+  const [reservationForm, setReservationForm] = useState({
+    name: "",
+    phone: "",
+    note: "",
+  });
+  const [reservationResult, setReservationResult] = useState(null);
   const compareRef = useRef(null);
   const vehicle = vehicles.find((item) => item.id === vehicleId);
 
@@ -59,28 +85,66 @@ export function VehicleDetailPage() {
   const warnings = buildRiskWarnings(vehicle, state);
   const routeText = vehicle.routeFit.join(" · ");
   const bars = getVehicleTechnicalBars(vehicle);
+  const suitabilityScore = computeScore(vehicle, state);
+  const totalPassengers = state.adults + state.children;
+  const tripDays = Math.max(
+    1,
+    Math.ceil(
+      (new Date(state.returnDate).getTime() - new Date(state.departureDate).getTime()) /
+        (1000 * 60 * 60 * 24),
+    ) || 1,
+  );
+  const estimatedTotal = vehicle.price * tripDays;
+  const reservationReady = reservationForm.name.trim().length > 1 && reservationForm.phone.trim().length > 6;
+
+  const handleReservationSubmit = (event) => {
+    event.preventDefault();
+    if (!reservationReady) return;
+
+    const result = createReservation({
+      vehicleId: vehicle.id,
+      customerName: reservationForm.name.trim(),
+      phone: reservationForm.phone.trim(),
+      note: reservationForm.note.trim(),
+    });
+
+    setReservationResult(result);
+    setReservationForm({ name: "", phone: "", note: "" });
+  };
 
   const handleAiInsight = async () => {
     setAiOpen(true);
     setAiLoading(true);
     setAiInsight("Gemini yanıtlıyor...");
+    const route = `${state.fromCity} → ${state.toCity}`;
+    const localFallback = [
+      `${vehicle.name}, ${route} rotası için ${vehicle.performance >= 7 ? "performans tarafında yeterli" : "performans tarafında daha sakin"} bir seçenek.`,
+      `${vehicle.luggage} L bagaj ve ${vehicle.seats} koltuk kapasitesiyle yolcu/bagaj ihtiyacı makulse tercih edilebilir.`,
+      `${vehicle.consumption} L/100km tüketim ve ₺${vehicle.price} günlük fiyatıyla karar verirken bütçe ve yol tipini birlikte değerlendirmek gerekir.`,
+    ].join(" ");
 
     const prompt = [
       `${vehicle.name} aracını bu seyahat için değerlendir.`,
       "Kısa ama açıklayıcı ol.",
+      "Selamlama, kapanış sözü veya anlamsız ek metin yazma.",
+      "Markdown başlığı, kalın yazı, parantezli başlık veya liste kullanma.",
+      "Yanıt 3 kısa cümleden oluşsun ve mutlaka tamamlanmış cümlelerle bitsin.",
       "Artıları, eksileri ve bu rota için uygunluğunu söyle.",
       "Varsa net bir öneri ver.",
       `Araç bilgisi: segment ${vehicle.segment}, fiyat ₺${vehicle.price}, yakıt ${vehicle.fuel}, tüketim ${vehicle.consumption} L/100km, bagaj ${vehicle.luggage} L, koltuk ${vehicle.seats}, konfor ${vehicle.comfort}/10, performans ${vehicle.performance}/10.`,
     ].join(" ");
 
-    const reply = await askGemini(prompt, {
+    const result = await askGemini(prompt, {
+      area: "Araç detayı Gemini yorumla",
       state,
       topVehicle: vehicle,
-      currentRoute: `${state.fromCity} → ${state.toCity}`,
+      currentRoute: route,
       showInWidget: false,
+      fallbackText: localFallback,
+      returnResult: true,
     });
 
-    setAiInsight(reply || "Gemini yanıtı alınamadı.");
+    setAiInsight(normalizeVehicleInsight(result.text, localFallback));
     setAiLoading(false);
   };
 
@@ -116,232 +180,297 @@ export function VehicleDetailPage() {
       best: price === Math.min(...Array.from({ length: 7 }, (_, i) => Math.round(vehicle.price * (1 + [-0.03, -0.01, 0.04, 0.08, 0.02, -0.02, 0.06][i])))),
     };
   });
+  const bestPrice = Math.min(...priceTimeline.map((day) => day.price));
+
+  const decisionItems = [
+    ["Rota", `${state.fromCity} → ${state.toCity}`],
+    ["Tarih", `${state.departureDate} / ${state.returnDate}`],
+    ["Yolcu", `${totalPassengers} kişi`],
+    ["Tahmini toplam", `₺${estimatedTotal.toLocaleString("tr-TR")}`],
+  ];
+
+  const quickSpecs = [
+    ["Günlük", `₺${vehicle.price.toLocaleString("tr-TR")}`],
+    ["Yakıt", vehicle.fuel],
+    ["Tüketim", `${vehicle.consumption} L/100km`],
+    ["Bagaj", `${vehicle.luggage} L`],
+    ["Koltuk", `${vehicle.seats} kişi`],
+    ["Vites", vehicle.transmission || "Otomatik"],
+  ];
 
   return (
-    <section className="section reveal">
-      <div className="section-heading">
-        <span className="eyebrow">Araç detayı</span>
-        <h2>{vehicle.name}</h2>
-        <p>{summary}</p>
-      </div>
+    <section className="section vehicle-detail-page reveal">
+      <Link className="detail-back-link" to="/vehicles">
+        <ArrowLeft size={18} />
+        Araçlara dön
+      </Link>
 
-      <div className="detail-layout">
-        <div className="detail-main glass">
-          <div
-            className="vehicle-hero-image vehicle-clickable"
-            role="button"
-            tabIndex={0}
+      <div className="detail-hero glass">
+        <div className="detail-hero-copy">
+          <span className="eyebrow">Araç detayı</span>
+          <h2>{vehicle.name}</h2>
+          <p>{summary}</p>
+          <div className="detail-pills">
+            <span>{vehicle.segment}</span>
+            <span>{vehicle.fuel}</span>
+            <span>{vehicle.transmission || "Otomatik"}</span>
+            <span>{routeText}</span>
+          </div>
+          <div className="detail-hero-actions">
+            <button className="primary-btn" type="button" onClick={handleAiInsight}>
+              <Sparkles size={18} />
+              Gemini ile yorumla
+            </button>
+            <a className="secondary-btn" href="#reservation">
+              <CalendarCheck size={18} />
+              Rezervasyon talebi
+            </a>
+          </div>
+        </div>
+
+        <div className="detail-hero-media">
+          <button
+            className="vehicle-hero-image"
+            type="button"
             onClick={() => setLightboxIndex(0)}
-            onKeyDown={(event) => event.key === "Enter" && setLightboxIndex(0)}
+            aria-label={`${vehicle.name} görselini büyüt`}
           >
             {vehicle.imageUrl ? (
               <img src={vehicle.imageUrl} alt={vehicle.name} />
             ) : (
               <div className="vehicle-hero-fallback">{vehicle.emoji}</div>
             )}
-          </div>
-
-          <div className="chip-row" style={{ marginTop: 18 }}>
-            <span className="chip active">{vehicle.segment}</span>
-            <span className="chip">{vehicle.fuel}</span>
-            <span className="chip">{routeText}</span>
-          </div>
-
-          <div className="analysis-snippet" style={{ marginTop: 14 }}>
-            {summary}
-          </div>
-
-          <div className="detail-gallery">
-            {galleryShots.map((shot, index) => (
-              <article
-                key={shot.title}
-                className="detail-gallery-card vehicle-clickable"
-                role="button"
-                tabIndex={0}
-                onClick={() => setLightboxIndex(index)}
-                onKeyDown={(event) => event.key === "Enter" && setLightboxIndex(index)}
-              >
-                <div className="detail-gallery-media">
-                  {shot.image ? (
-                    <img src={shot.image} alt={shot.title} />
-                  ) : (
-                    <div className="detail-gallery-fallback">{shot.fallback}</div>
-                  )}
-                </div>
-                <strong>{shot.title}</strong>
-              </article>
-            ))}
+          </button>
+          <div className="detail-score-card">
+            <span>Gemini uygunluk</span>
+            <strong>{suitabilityScore}/100</strong>
           </div>
         </div>
+      </div>
+
+      <div className="detail-layout">
+        <main className="detail-main">
+          <section className="detail-card glass">
+            <div className="detail-section-title">
+              <span className="eyebrow">Karar özeti</span>
+              <h3>Bu araç seyahate ne kadar uyuyor?</h3>
+            </div>
+            <div className="decision-summary-grid">
+              {decisionItems.map(([label, value]) => (
+                <div key={label} className="decision-summary-item">
+                  <span>{label}</span>
+                  <strong>{value}</strong>
+                </div>
+              ))}
+            </div>
+            <div className="detail-note">
+              <strong>{vehicle.notes}</strong>
+              <ul className="risk-list compact">
+                {warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          </section>
+
+          <section className="detail-card glass">
+            <div className="detail-section-title">
+              <span className="eyebrow">Teknik bilgiler</span>
+              <h3>Günlük kullanım metrikleri</h3>
+            </div>
+            <div className="detail-spec-grid">
+              {quickSpecs.map(([label, value]) => (
+                <div key={label} className="detail-spec-card">
+                  <span>{label}</span>
+                  <strong>{value}</strong>
+                </div>
+              ))}
+            </div>
+            <div className="bar-list detail-bar-list">
+              {bars.map((bar) => (
+                <div key={bar.label} className="bar-row">
+                  <div className="bar-labels">
+                    <span>{bar.label}</span>
+                    <strong>%{bar.value}</strong>
+                  </div>
+                  <div className="bar-track has-tooltip" data-tip={bar.tip}>
+                    <span style={{ width: `${bar.value}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="detail-card glass">
+            <div className="detail-section-title">
+              <span className="eyebrow">Görseller</span>
+              <h3>Araç görünümü</h3>
+            </div>
+            <div className="detail-gallery">
+              {galleryShots.map((shot, index) => (
+                <button
+                  key={shot.title}
+                  className="detail-gallery-card"
+                  type="button"
+                  onClick={() => setLightboxIndex(index)}
+                >
+                  <span className="detail-gallery-media">
+                    {shot.image ? (
+                      <img src={shot.image} alt={shot.title} />
+                    ) : (
+                      <span className="detail-gallery-fallback">{shot.fallback}</span>
+                    )}
+                  </span>
+                  <strong>{shot.title}</strong>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section ref={compareRef} id="compare-section" className="detail-card glass">
+            <div className="detail-section-title">
+              <span className="eyebrow">Alternatifler</span>
+              <h3>Benzer araçlarla hızlı kıyas</h3>
+            </div>
+            <div className="detail-related-grid">
+              {similarVehicles.map((item) => (
+                <article key={item.id} className="detail-related-card">
+                  <div className="detail-related-media">
+                    {item.imageUrl ? <img src={item.imageUrl} alt={item.name} /> : item.emoji}
+                  </div>
+                  <div>
+                    <strong>{item.name}</strong>
+                    <span>{item.segment}</span>
+                  </div>
+                  <p>₺{item.price}/gün · {item.fuel} · {item.luggage} L</p>
+                  <div className="detail-related-actions">
+                    <button
+                      className="secondary-btn"
+                      type="button"
+                      onClick={() => {
+                        setCompareId(item.id);
+                        window.setTimeout(() => {
+                          document.getElementById("compare-area")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }, 0);
+                      }}
+                    >
+                      <Scale size={16} />
+                      Kıyasla
+                    </button>
+                    <Link className="primary-btn" to={`/vehicles/${item.id}`}>
+                      İncele
+                    </Link>
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <div id="compare-area" className="detail-compare-box">
+              {compareVehicle ? (
+                <div className="detail-compare-grid">
+                  {[vehicle, compareVehicle].map((item) => (
+                    <article key={item.id} className="compare-card">
+                      <strong>{item.name}</strong>
+                      <dl>
+                        <div>
+                          <dt>Fiyat</dt>
+                          <dd>₺{item.price}/gün</dd>
+                        </div>
+                        <div>
+                          <dt>Tüketim</dt>
+                          <dd>{item.consumption} L/100km</dd>
+                        </div>
+                        <div>
+                          <dt>Bagaj</dt>
+                          <dd>{item.luggage} L</dd>
+                        </div>
+                        <div>
+                          <dt>Konfor</dt>
+                          <dd>{item.comfort}/10</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="analysis-snippet">Alternatiflerden “Kıyasla” seçerek teknik farkları yan yana görebilirsin.</p>
+              )}
+            </div>
+          </section>
+        </main>
 
         <aside className="detail-side">
-          <div className="analysis-track glass">
-            <div className="analysis-steps">
-              <div className="analysis-step active">AI özet</div>
-              <div className="analysis-step">Teknik veriler</div>
-              <div className="analysis-step">Uyumluluk</div>
-              <div className="analysis-step">Risk notları</div>
+          <section className="detail-card glass detail-sticky-card">
+            <div className="detail-price">
+              <span>Günlük fiyat</span>
+              <strong>₺{vehicle.price.toLocaleString("tr-TR")}</strong>
+              <small>{tripDays} günlük tahmini toplam ₺{estimatedTotal.toLocaleString("tr-TR")}</small>
             </div>
-          </div>
-
-          <div className="detail-card glass">
-            <h3>Teknik Bilgiler</h3>
-            <div className="vehicle-specs">
-              <div className="metric-row">
-                <span>Günlük fiyat</span>
-                <strong>₺{vehicle.price}</strong>
-              </div>
-              <div className="metric-row">
-                <span>Yakıt tüketimi</span>
-                <strong>{vehicle.consumption} L/100km</strong>
-              </div>
-              <div className="metric-row">
-                <span>Bagaj hacmi</span>
-                <strong>{vehicle.luggage} L</strong>
-              </div>
-              <div className="metric-row">
-                <span>Kişi kapasitesi</span>
-                <strong>{vehicle.seats} kişi</strong>
-              </div>
-              <div className="metric-row">
-                <span>Konfor</span>
-                <strong>{vehicle.comfort}/10</strong>
-              </div>
-              <div className="metric-row">
-                <span>Performans</span>
-                <strong>{vehicle.performance}/10</strong>
-              </div>
-            </div>
-          </div>
-
-          <div className="detail-card glass">
-            <div className="detail-actions">
-              <button className="primary-btn" type="button" onClick={handleAiInsight}>
-                AI ile yorumla
-              </button>
-            </div>
-            {aiOpen ? <p className="analysis-snippet">{aiLoading ? "Gemini yanıtlıyor..." : aiInsight}</p> : null}
-          </div>
-
-          <div className="detail-card glass">
-            <h3>AI Uyumluluk</h3>
-            <p className="details">{vehicle.notes}</p>
-            <div className="decision-tags" style={{ marginTop: 14 }}>
-              <span>Şehir içi</span>
-              <span>Uzun yol</span>
-              <span>Outdoor</span>
-            </div>
-            <ul className="risk-list" style={{ marginTop: 18 }}>
-              {warnings.map((warning) => (
-                <li key={warning}>{warning}</li>
+            <div className="price-timeline">
+              {priceTimeline.map((day) => (
+                <div key={day.label} className={day.price === bestPrice ? "best" : ""}>
+                  <span>{day.label}</span>
+                  <strong>₺{day.price}</strong>
+                </div>
               ))}
-            </ul>
-          </div>
-        </aside>
-      </div>
-
-      <div className="detail-bars glass" style={{ marginTop: 18 }}>
-        <div className="section-heading" style={{ marginBottom: 12 }}>
-          <span className="eyebrow">Teknik özellik karşılaştırma barları</span>
-          <h3 style={{ margin: 0 }}>Bu araç nasıl konumlanıyor?</h3>
-        </div>
-        <div className="bar-list">
-          {bars.map((bar) => (
-            <div key={bar.label} className="bar-row">
-              <div className="bar-labels">
-                <span>{bar.label}</span>
-                <strong>%{bar.value}</strong>
-              </div>
-              <div className="bar-track has-tooltip" data-tip={bar.tip}>
-                <span style={{ width: `${bar.value}%` }} />
-              </div>
             </div>
-          ))}
-        </div>
-      </div>
-
-      <div ref={compareRef} id="compare-section" className="detail-related" style={{ marginTop: 18 }}>
-        <div className="section-heading">
-          <span className="eyebrow">Benzer araçlar</span>
-          <h3 style={{ margin: 0 }}>Alternatif ürünler</h3>
-        </div>
-        <div className="vehicle-grid">
-          {similarVehicles.map((item) => (
-            <article key={item.id} className="vehicle-card">
-              <div className="vehicle-visual">
-                {item.imageUrl ? (
-                  <img
-                    src={item.imageUrl}
-                    alt={item.name}
-                    style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 20 }}
-                  />
-                ) : (
-                  item.emoji
-                )}
+            {aiOpen ? (
+              <div className="detail-ai-answer">
+                <span className="eyebrow">Gemini yorumu</span>
+                <p>{aiLoading ? "Gemini yanıtlıyor..." : aiInsight}</p>
               </div>
-              <div className="badge">{item.segment}</div>
-              <h3>{item.name}</h3>
-              <p className="details">{item.aiSummary || buildVehicleSummary(item)}</p>
-              <div className="vehicle-specs">
-                <div className="metric-row">
-                  <span>Fiyat</span>
-                  <strong>₺{item.price}/gün</strong>
-                </div>
-                <div className="metric-row">
-                  <span>Yakıt</span>
-                  <strong>{item.fuel}</strong>
-                </div>
-              </div>
-              <div className="planner-actions" style={{ marginTop: 14 }}>
-                <button
-                  className="secondary-btn"
-                  type="button"
-                  onClick={() => {
-                    setCompareId(item.id);
-                    window.setTimeout(() => {
-                      document.getElementById("compare-area")?.scrollIntoView({ behavior: "smooth", block: "start" });
-                    }, 0);
-                  }}
-                >
-                  Karşılaştır
-                </button>
-                <Link className="primary-btn" to={`/vehicles/${item.id}`}>
-                  İncele
-                </Link>
-              </div>
-            </article>
-          ))}
-        </div>
-      </div>
+            ) : null}
+          </section>
 
-      <div id="compare-area" className="detail-bars glass" style={{ marginTop: 18 }}>
-        <div className="section-heading" style={{ marginBottom: 12 }}>
-          <span className="eyebrow">Karşılaştırma alanı</span>
-          <h3 style={{ margin: 0 }}>Seçilen araçla hızlı kıyas</h3>
-        </div>
-        {compareVehicle ? (
-          <div className="detail-compare-grid">
-            <article className="compare-card">
-              <strong>{vehicle.name}</strong>
-              <p>{summary}</p>
-            </article>
-            <article className="compare-card">
-              <strong>{compareVehicle.name}</strong>
-              <p>{compareVehicle.aiSummary || buildVehicleSummary(compareVehicle)}</p>
-            </article>
-          </div>
-        ) : (
-          <p className="analysis-snippet">Benzer araçlardan “Karşılaştır” butonuna basarak iki aracı yan yana görebilirsin.</p>
-        )}
-      </div>
-
-      <div className="planner-actions" style={{ marginTop: 20 }}>
-        <Link className="secondary-btn" to="/vehicles">
-          Araçlara Dön
-        </Link>
-        <Link className="primary-btn" to="/planner">
-          Bu araç bana uygun mu? AI&apos;a sor
-        </Link>
+          <form id="reservation" className="detail-card glass reservation-card" onSubmit={handleReservationSubmit}>
+            <div className="detail-section-title">
+              <span className="eyebrow">Rezervasyon</span>
+              <h3>Talep oluştur</h3>
+            </div>
+            <label className="field">
+              <span>Ad soyad</span>
+              <input
+                type="text"
+                value={reservationForm.name}
+                onChange={(event) =>
+                  setReservationForm((prev) => ({ ...prev, name: event.target.value }))
+                }
+                placeholder="Müşteri adı"
+              />
+            </label>
+            <label className="field">
+              <span>Telefon</span>
+              <input
+                type="tel"
+                value={reservationForm.phone}
+                onChange={(event) =>
+                  setReservationForm((prev) => ({ ...prev, phone: event.target.value }))
+                }
+                placeholder="05xx xxx xx xx"
+              />
+            </label>
+            <label className="field">
+              <span>Not</span>
+              <textarea
+                rows="3"
+                value={reservationForm.note}
+                onChange={(event) =>
+                  setReservationForm((prev) => ({ ...prev, note: event.target.value }))
+                }
+                placeholder="Teslim alma saati, ek istek veya ödeme notu"
+              />
+            </label>
+            <button className="primary-btn" type="submit" disabled={!reservationReady}>
+              <CalendarCheck size={18} />
+              Talep oluştur
+            </button>
+            {reservationResult ? (
+              <p className="reservation-success">
+                {reservationResult.vehicleName} için talep alındı. Admin panelinden takip edilebilir.
+              </p>
+            ) : null}
+          </form>
+        </aside>
       </div>
 
       {lightboxIndex !== null ? (
@@ -353,21 +482,21 @@ export function VehicleDetailPage() {
         >
           <div className="lightbox-panel" onClick={(event) => event.stopPropagation()}>
             <button className="lightbox-close" type="button" onClick={() => setLightboxIndex(null)}>
-              ×
+              <X size={20} />
             </button>
             <button
               className="lightbox-nav left"
               type="button"
               onClick={() => setLightboxIndex((index) => (index - 1 + galleryShots.length) % galleryShots.length)}
             >
-              ‹
+              <ChevronLeft size={28} />
             </button>
             <button
               className="lightbox-nav right"
               type="button"
               onClick={() => setLightboxIndex((index) => (index + 1) % galleryShots.length)}
             >
-              ›
+              <ChevronRight size={28} />
             </button>
             <div className="lightbox-media">
               {galleryShots[lightboxIndex].image ? (

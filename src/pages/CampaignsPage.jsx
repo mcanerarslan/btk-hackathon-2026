@@ -1,4 +1,9 @@
+import { useTrip } from "../TripContext";
+
 export function CampaignsPage() {
+  const { campaigns } = useTrip();
+  const activeCampaigns = campaigns.filter((campaign) => campaign.status === "active");
+
   return (
     <section id="campaigns" className="section campaigns reveal">
       <div className="section-heading">
@@ -6,15 +11,15 @@ export function CampaignsPage() {
         <h2>Sezonluk fırsatlar ve AI önerileri.</h2>
       </div>
       <div className="promo-grid">
-        {[
-          ["Yaz rotaları", "%20 indirimli SUV seçkisi", "Uzun yol ve aile kullanımına uygun araçlar."],
-          ["Hafta sonu", "Kompakt araçlarda düşük fiyat", "Şehir içi ve kısa mesafe planları için."],
-          ["Outdoor", "Kamp paketleri", "Bagaj hacmi ve yol dayanımı öncelikli seçimler."],
-        ].map(([title, big, text]) => (
-          <article key={title} className="promo-card glass">
-            <span>{title}</span>
-            <strong>{big}</strong>
-            <p>{text}</p>
+        {activeCampaigns.map((campaign) => (
+          <article key={campaign.id} className="promo-card glass">
+            <span>{campaign.title}</span>
+            <strong>{campaign.headline}</strong>
+            <p>{campaign.description}</p>
+            <small>
+              {campaign.code ? `${campaign.code} kodu` : campaign.audience}
+              {campaign.discount ? ` · %${campaign.discount}` : ""}
+            </small>
           </article>
         ))}
       </div>

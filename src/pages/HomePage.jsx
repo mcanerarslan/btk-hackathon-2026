@@ -1,8 +1,16 @@
 import { Link } from "react-router-dom";
+import { buildRecommendationSet, estimateFuelCost, getRouteLabel } from "../services/recommendationService";
 import { useTrip } from "../TripContext";
 
 export function HomePage() {
-  const { state } = useTrip();
+  const { state, vehicles } = useTrip();
+  const recommendationSet = buildRecommendationSet(vehicles, state);
+  const popularVehicles = recommendationSet.scored.slice(0, 3);
+  const routeScenarios = [
+    ["İstanbul", "Rize", "Yayla ve uzun yol", "mountain"],
+    ["İzmir", "Bodrum", "Ekonomik hafta sonu", "city"],
+    ["Ankara", "Kapadokya", "Aile ve bagaj dengesi", "mixed"],
+  ];
 
   return (
     <>
@@ -23,10 +31,10 @@ export function HomePage() {
           </p>
           <div className="hero-actions">
             <Link className="primary-btn large" to="/planner">
-              Seyahatimi Planla
+              Robot Rent A Car Uzmanına Sor
             </Link>
             <Link className="secondary-btn large" to="/vehicles">
-              Araçları İncele
+              Araçları Klasik Olarak İncele
             </Link>
           </div>
           <div className="hero-stats">
@@ -48,7 +56,7 @@ export function HomePage() {
         <div className="hero-visual reveal delay-1">
           <div className="visual-card glass">
             <div className="visual-card-top">
-              <span>AI analiz paneli</span>
+              <span>Robot Rent Expert analiz paneli</span>
               <span className="status-dot">Çevrimiçi</span>
             </div>
             <div className="route-map">
@@ -92,8 +100,8 @@ export function HomePage() {
               </div>
             </div>
           </div>
-          <div className="floating-note glass">
-            <strong>AI karar alanı</strong>
+          <div className="floating-note glass gemini-border">
+            <strong>Robot karar alanı</strong>
             <p>
               “5 kişi, 4 büyük valiz ve yayla rotası için küçük hatchback yerine SUV veya crossover
               önerildi.”
@@ -104,8 +112,8 @@ export function HomePage() {
 
       <section className="section quick-start reveal">
         <div className="section-heading">
-          <span className="eyebrow">Hızlı başlangıç</span>
-          <h2>Aramak yerine söyle, önerelim.</h2>
+          <span className="eyebrow">Robot nasıl karar verir?</span>
+          <h2>Aramak yerine ihtiyacını anlat.</h2>
         </div>
         <div className="quick-grid">
           <div className="quick-card glass">
@@ -123,6 +131,82 @@ export function HomePage() {
             <strong>Ekonomi, konfor veya performans seç</strong>
             <p>AI sana en uygun araç tipine hızla yönelsin.</p>
           </div>
+        </div>
+      </section>
+
+      <section className="section reveal">
+        <div className="section-heading">
+          <span className="eyebrow">Hackathon kriterlerine hazır</span>
+          <h2>Demo sadece görsel değil, karar veren bir ürün.</h2>
+          <p>
+            Kullanıcı değerini rota ve bütçe probleminden alır; teknik tarafta skorlama,
+            fallback AI, admin denetimi ve müşteri talebi akışını birlikte çalıştırır.
+          </p>
+        </div>
+        <div className="value-grid">
+          {[
+            ["Kullanıcı değeri", "Kişi, bagaj, rota ve bütçe bilgisiyle doğru araç seçimini hızlandırır."],
+            ["Teknik mimari", "Deterministik öneri motoru Gemini yanıtı gelmediğinde de çalışmaya devam eder."],
+            ["Agentic yapı", "Widget, araç detayı ve admin uzmanı farklı görevlerde AI karar desteği verir."],
+            ["Teslim edilebilir ürün", "Araç kataloğu, rezervasyon talebi, admin paneli ve canlı demo akışı hazırdır."],
+          ].map(([title, text]) => (
+            <article key={title} className="value-card glass">
+              <strong>{title}</strong>
+              <p>{text}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="section reveal">
+        <div className="section-heading">
+          <span className="eyebrow">Popüler araçlar</span>
+          <h2>Aktif rotaya göre öne çıkanlar</h2>
+        </div>
+        <div className="vehicle-grid">
+          {popularVehicles.map(({ vehicle, score }) => {
+            const cost = estimateFuelCost(vehicle, state);
+            return (
+              <article key={vehicle.id} className="vehicle-card">
+                <div className="vehicle-visual">
+                  {vehicle.imageUrl ? <img src={vehicle.imageUrl} alt={vehicle.name} /> : vehicle.emoji}
+                  <div className="badge">{vehicle.segment}</div>
+                </div>
+                <h3>{vehicle.name}</h3>
+                <div className="score">{score}/100 Robot skoru</div>
+                <p className="details">{vehicle.notes}</p>
+                <div className="vehicle-specs">
+                  <div className="metric-row">
+                    <span>Günlük fiyat</span>
+                    <strong>₺{vehicle.price}</strong>
+                  </div>
+                  <div className="metric-row">
+                    <span>Tahmini yakıt</span>
+                    <strong>₺{cost.fuel.toLocaleString("tr-TR")}</strong>
+                  </div>
+                </div>
+                <Link className="primary-btn" to={`/vehicles/${vehicle.id}`}>
+                  Detay
+                </Link>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="section reveal">
+        <div className="section-heading">
+          <span className="eyebrow">Popüler rota senaryoları</span>
+          <h2>Jüri demosu için hızlı örnekler</h2>
+        </div>
+        <div className="quick-grid">
+          {routeScenarios.map(([from, to, title, routeType]) => (
+            <Link key={`${from}-${to}`} className="quick-card glass route-scenario" to="/planner">
+              <span>{getRouteLabel(routeType)}</span>
+              <strong>{from} → {to}</strong>
+              <p>{title}</p>
+            </Link>
+          ))}
         </div>
       </section>
     </>

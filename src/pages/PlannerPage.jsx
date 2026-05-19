@@ -76,6 +76,19 @@ export function PlannerPage() {
                   onChange={(e) => setState((prev) => ({ ...prev, returnDate: e.target.value }))}
                 />
               </label>
+              <label className="field">
+                <span>Yolculuk amacı</span>
+                <select
+                  value={state.purpose}
+                  onChange={(e) => setState((prev) => ({ ...prev, purpose: e.target.value }))}
+                >
+                  <option value="holiday">Tatil</option>
+                  <option value="business">İş</option>
+                  <option value="familyVisit">Aile ziyareti</option>
+                  <option value="cityUse">Şehir içi kullanım</option>
+                  <option value="longTrip">Uzun yol</option>
+                </select>
+              </label>
             </div>
           </div>
 
@@ -157,6 +170,67 @@ export function PlannerPage() {
           </div>
 
           <div className={`form-step ${state.step === 5 ? "active" : ""}`} data-step="5">
+            <label className="field budget-field">
+              <span>Günlük bütçe: ₺{Number(state.budget || 0).toLocaleString("tr-TR")}</span>
+              <input
+                type="range"
+                min="1200"
+                max="5000"
+                step="100"
+                value={state.budget}
+                onChange={(e) => setState((prev) => ({ ...prev, budget: Number(e.target.value) }))}
+              />
+            </label>
+            <div className="field-grid two">
+              <label className="field">
+                <span>Minimum bütçe</span>
+                <input
+                  type="number"
+                  min="1000"
+                  max={state.budget}
+                  step="100"
+                  value={state.budgetMin}
+                  onChange={(e) => setState((prev) => ({ ...prev, budgetMin: Number(e.target.value) }))}
+                />
+              </label>
+              <label className="field">
+                <span>Araç tipi tercihi</span>
+                <select
+                  value={state.vehiclePreference}
+                  onChange={(e) => setState((prev) => ({ ...prev, vehiclePreference: e.target.value }))}
+                >
+                  <option value="any">Fark etmez</option>
+                  <option value="sedan">Sedan</option>
+                  <option value="hatchback">Hatchback</option>
+                  <option value="suv">SUV</option>
+                  <option value="electric">Elektrikli / Hibrit</option>
+                  <option value="automatic">Otomatik</option>
+                  <option value="manual">Manuel</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Yakıt önceliği</span>
+                <select
+                  value={state.fuelPriority}
+                  onChange={(e) => setState((prev) => ({ ...prev, fuelPriority: e.target.value }))}
+                >
+                  <option value="economic">Ekonomik</option>
+                  <option value="balanced">Dengeli</option>
+                  <option value="performance">Performanslı</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Konfor önceliği</span>
+                <select
+                  value={state.comfortPriority}
+                  onChange={(e) => setState((prev) => ({ ...prev, comfortPriority: e.target.value }))}
+                >
+                  <option value="low">Düşük</option>
+                  <option value="medium">Orta</option>
+                  <option value="high">Yüksek</option>
+                </select>
+              </label>
+            </div>
             <div className="priority-grid">
               {[
                 ["economy", "En ekonomik", "Düşük günlük ücret, düşük tüketim"],

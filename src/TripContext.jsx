@@ -2,117 +2,57 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import { useNavigate } from "react-router-dom";
 import {
   analysisStages,
-  assistantReply,
+  buildVehicleSummary,
   buildRiskWarnings,
   clamp,
   computeScore,
+  campaigns as baseCampaigns,
   initialState,
+  mergeCampaignCatalog,
   vehicles as baseVehicles,
 } from "./data";
+import {
+  generateGeminiText,
+  generateStructuredRecommendation,
+  getGeminiStatus,
+  logAiDevEvent,
+  sendTripQuestion,
+} from "./services/geminiService";
 
 const TripContext = createContext(null);
-const GEMINI_MODEL = import.meta.env.VITE_GEMINI_MODEL || "gemini-2.5-flash";
-const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-function buildGeminiPrompt(question, state, topVehicle, currentRoute) {
-  const vehicleContext = topVehicle
-    ? [
-        `Önerilen araç: ${topVehicle.name}`,
-        `Segment: ${topVehicle.segment}`,
-        `Fiyat: ₺${topVehicle.price}/gün`,
-        `Yakıt: ${topVehicle.fuel}`,
-        `Tüketim: ${topVehicle.consumption} L/100km`,
-        `Bagaj: ${topVehicle.luggage} L`,
-        `Koltuk: ${topVehicle.seats}`,
-        `Konfor: ${topVehicle.comfort}/10`,
-        `Performans: ${topVehicle.performance}/10`,
-        `Not: ${topVehicle.notes}`,
-      ].join("\n")
-    : "Önerilen araç: yok";
+const defaultSiteSettings = {
+  siteName: "Robot Rent A Car",
+  logoText: "R",
+  logoUrl: "",
+  faviconUrl: "",
+  headerTitle: "Robot Rent A Car",
+  headerSubtitle: "Gemini destekli araç kiralama uzmanı",
+  footerText: "İhtiyacını anlat, robot uzman rota, bagaj, bütçe ve yol şartına göre aracı seçsin.",
+  footerNote: "Demo panel · login gerekmez",
+  footerLegal: "KVKK · Gizlilik · Kullanım Şartları",
+};
 
-  return [
-    "Sen bir araç kiralama ve rota planlama asistanısın.",
-    "Yanıtı Türkçe ver.",
-    "Kısa, net ve açıklamalı cevap ver.",
-    "Kullanıcının sorusuna göre öneri yap ama uydurma veri ekleme.",
-    "Eğer uygun araç varsa adını açıkça söyle.",
-    "",
-    `Kullanıcı sorusu: ${question}`,
-    `Rota: ${currentRoute}`,
-    `Yolcu sayısı: ${state.adults + state.children}`,
-    `Bagaj: ${state.largeBags} büyük, ${state.mediumBags} orta, ${state.backpacks} sırt çantası`,
-    `Öncelik: ${state.priority}`,
-    vehicleContext,
-  ].join("\n");
-}
+const defaultReservations = [];
 
-function extractGeminiText(payload) {
-  const parts = payload?.candidates?.[0]?.content?.parts;
-  if (!Array.isArray(parts)) return "";
-  return parts
-    .map((part) => part?.text || "")
-    .join("")
-    .trim();
-}
+function mergeVehicleCatalog(storedVehicles) {
+  if (!Array.isArray(storedVehicles)) return baseVehicles;
 
-async function fetchGeminiReply(question, state, topVehicle, currentRoute) {
-  if (!GEMINI_API_KEY) return null;
+  const storedById = new Map(storedVehicles.map((vehicle) => [vehicle.id, vehicle]));
+  const mergedBase = baseVehicles.map((baseVehicle) => {
+    const storedVehicle = storedById.get(baseVehicle.id);
+    if (!storedVehicle) return baseVehicle;
 
-  const response = await fetch(GEMINI_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": GEMINI_API_KEY,
-    },
-    body: JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: buildGeminiPrompt(question, state, topVehicle, currentRoute) }],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.4,
-        maxOutputTokens: 220,
-      },
-    }),
+    return {
+      ...baseVehicle,
+      ...storedVehicle,
+      imageUrl: storedVehicle.imageUrl || baseVehicle.imageUrl || "",
+    };
   });
+  const baseIds = new Set(baseVehicles.map((vehicle) => vehicle.id));
+  const customVehicles = storedVehicles.filter((vehicle) => !baseIds.has(vehicle.id));
 
-  if (!response.ok) {
-    throw new Error(`Gemini API error: ${response.status}`);
-  }
-
-  const payload = await response.json();
-  return extractGeminiText(payload) || null;
-}
-
-async function sendGeminiQuestion({
-  question,
-  state,
-  topVehicle,
-  currentRoute,
-  onPending,
-  onSuccess,
-  onFallback,
-}) {
-  const localReply = assistantReply(question, state, topVehicle, currentRoute);
-  if (!GEMINI_API_KEY) {
-    onFallback?.(localReply);
-    return localReply;
-  }
-
-  onPending?.();
-
-  try {
-    const geminiReply = await fetchGeminiReply(question, state, topVehicle, currentRoute);
-    const reply = geminiReply || localReply;
-    onSuccess?.(reply);
-    return reply;
-  } catch {
-    onFallback?.(localReply);
-    return localReply;
-  }
+  return [...mergedBase, ...customVehicles];
 }
 
 export function TripProvider({ children }) {
@@ -122,7 +62,7 @@ export function TripProvider({ children }) {
     if (typeof window === "undefined") return baseVehicles;
     try {
       const stored = window.localStorage.getItem("tripai_vehicles");
-      return stored ? JSON.parse(stored) : baseVehicles;
+      return stored ? mergeVehicleCatalog(JSON.parse(stored)) : baseVehicles;
     } catch {
       return baseVehicles;
     }
@@ -132,6 +72,9 @@ export function TripProvider({ children }) {
   const [analysisStep, setAnalysisStep] = useState(0);
   const [analysisStatus, setAnalysisStatus] = useState("Hazırlanıyor");
   const [analysisSnippet, setAnalysisSnippet] = useState("Rota analiz ediliyor...");
+  const [aiRecommendation, setAiRecommendation] = useState(null);
+  const [aiRecommendationLoading, setAiRecommendationLoading] = useState(false);
+  const [aiRecommendationError, setAiRecommendationError] = useState("");
   const [widgetOpen, setWidgetOpen] = useState(false);
   const [widgetDraft, setWidgetDraft] = useState("");
   const messageIdRef = useRef(1);
@@ -139,15 +82,44 @@ export function TripProvider({ children }) {
     {
       id: "welcome-0",
       kind: "assistant",
-      text: "Merhaba, seyahat bilgilerini girmeni bekliyorum. İstersen sana en uygun aracı açıklamalı şekilde bulurum.",
+      text: "Merhaba, ben Gemini destekli Robot Rent Expert. Rota, kişi ve bagaj bilgine göre en uygun aracı açıklamalı şekilde bulurum.",
     },
   ]);
+  const [siteSettings, setSiteSettings] = useState(() => {
+    if (typeof window === "undefined") return defaultSiteSettings;
+    try {
+      const stored = window.localStorage.getItem("tripai_site_settings");
+      return stored ? { ...defaultSiteSettings, ...JSON.parse(stored) } : defaultSiteSettings;
+    } catch {
+      return defaultSiteSettings;
+    }
+  });
+  const [reservations, setReservations] = useState(() => {
+    if (typeof window === "undefined") return defaultReservations;
+    try {
+      const stored = window.localStorage.getItem("tripai_reservations");
+      return stored ? JSON.parse(stored) : defaultReservations;
+    } catch {
+      return defaultReservations;
+    }
+  });
+  const [campaigns, setCampaigns] = useState(() => {
+    if (typeof window === "undefined") return baseCampaigns;
+    try {
+      const stored = window.localStorage.getItem("tripai_campaigns");
+      return stored ? mergeCampaignCatalog(JSON.parse(stored)) : baseCampaigns;
+    } catch {
+      return baseCampaigns;
+    }
+  });
+  const [aiRequestLog, setAiRequestLog] = useState([]);
 
   const timerRef = useRef(null);
 
   const ranked = useMemo(
     () =>
       vehicles
+        .filter((vehicle) => vehicle.available !== false)
         .map((vehicle) => ({
           vehicle,
           score: computeScore(vehicle, state),
@@ -157,6 +129,7 @@ export function TripProvider({ children }) {
     [
       state.routeType,
       state.priority,
+      state.budget,
       state.adults,
       state.children,
       state.seats,
@@ -164,6 +137,12 @@ export function TripProvider({ children }) {
       state.mediumBags,
       state.backpacks,
       state.oversize,
+      state.purpose,
+      state.fuelPriority,
+      state.comfortPriority,
+      state.vehiclePreference,
+      state.budgetMin,
+      vehicles,
     ],
   );
 
@@ -184,7 +163,58 @@ export function TripProvider({ children }) {
     }
   }, [vehicles]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("tripai_site_settings", JSON.stringify(siteSettings));
+    } catch {
+      // Ignore storage failures in demo mode.
+    }
+  }, [siteSettings]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("tripai_reservations", JSON.stringify(reservations));
+    } catch {
+      // Ignore storage failures in demo mode.
+    }
+  }, [reservations]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("tripai_campaigns", JSON.stringify(campaigns));
+    } catch {
+      // Ignore storage failures in demo mode.
+    }
+  }, [campaigns]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+
+    document.title = `${siteSettings.siteName} - Akıllı Araç Kiralama Asistanı`;
+    let favicon = document.querySelector("link[rel='icon']");
+    if (!favicon) {
+      favicon = document.createElement("link");
+      favicon.rel = "icon";
+      document.head.appendChild(favicon);
+    }
+    favicon.href = siteSettings.faviconUrl || siteSettings.logoUrl || "/favicon.svg";
+  }, [siteSettings.faviconUrl, siteSettings.logoUrl, siteSettings.siteName]);
+
   const routeLabel = `${state.fromCity} → ${state.toCity}`;
+
+  const appendAiLog = (entry) => {
+    setAiRequestLog((prev) =>
+      [
+        {
+          id: `ai-log-${Date.now()}-${prev.length}`,
+          createdAt: new Date().toLocaleString("tr-TR"),
+          model: getGeminiStatus().model,
+          ...entry,
+        },
+        ...prev,
+      ].slice(0, 8),
+    );
+  };
 
   useEffect(() => {
     return () => {
@@ -245,6 +275,7 @@ export function TripProvider({ children }) {
     ranked,
     state.routeType,
     state.priority,
+    state.budget,
     state.adults,
     state.children,
     state.seats,
@@ -264,12 +295,41 @@ export function TripProvider({ children }) {
   };
 
   const handleAnalyze = () => {
+    if (!state.fromCity.trim() || !state.toCity.trim() || !state.departureDate) {
+      setAnalysisVisible(false);
+      setAnalysisRunning(false);
+      setAnalysisStatus("Eksik bilgi");
+      setAnalysisSnippet("Başlangıç, varış ve tarih bilgisi olmadan analiz başlatılamaz.");
+      window.alert("Analiz için başlangıç, varış ve yolculuk tarihi gerekli.");
+      return;
+    }
+
     setAnalysisVisible(true);
     setAnalysisRunning(true);
+    setAiRecommendationLoading(true);
+    setAiRecommendationError("");
     setAnalysisStep(0);
     setAnalysisStatus("Analiz başlatıldı");
     setAnalysisSnippet("Rota analiz ediliyor...");
     navigate("/analysis");
+
+    generateStructuredRecommendation(state, vehicles)
+      .then((result) => {
+        setAiRecommendation(result.data);
+        setAiRecommendationError(result.error || "");
+        appendAiLog({
+          area: "Agentic JSON öneri",
+          question: `${state.fromCity} - ${state.toCity}`,
+          source: result.source,
+          error: result.error || "",
+        });
+      })
+      .catch((error) => {
+        setAiRecommendationError(error.message);
+      })
+      .finally(() => {
+        setAiRecommendationLoading(false);
+      });
   };
 
   const handleSendMessage = (text) => {
@@ -286,27 +346,29 @@ export function TripProvider({ children }) {
     ]);
     setWidgetDraft("");
 
-    sendGeminiQuestion({
+    sendTripQuestion({
       question: trimmed,
       state,
       topVehicle,
       currentRoute: routeLabel,
-      onFallback: (reply) => {
+    }).then((result) => {
+      appendAiLog({ area: "Floating widget", question: trimmed, source: result.source, error: result.error || "" });
+      if (result.source === "fallback") {
         window.setTimeout(() => {
           setMessages((prev) =>
             prev.map((message) =>
-              message.id === assistantMessageId ? { ...message, text: reply } : message,
+              message.id === assistantMessageId ? { ...message, text: result.text } : message,
             ),
           );
         }, 180);
-      },
-      onSuccess: (reply) => {
-        setMessages((prev) =>
-          prev.map((message) =>
-            message.id === assistantMessageId ? { ...message, text: reply } : message,
-          ),
-        );
-      },
+        return;
+      }
+
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.id === assistantMessageId ? { ...message, text: result.text } : message,
+        ),
+      );
     });
   };
 
@@ -328,27 +390,153 @@ export function TripProvider({ children }) {
       ]);
     }
 
-    return sendGeminiQuestion({
+    logAiDevEvent({
+      area: overrides.area || "AI action",
+      action: "Gemini istegi basladi",
+      vehicle: resolvedTopVehicle?.name || "",
+      route: resolvedRoute,
+    });
+
+    return sendTripQuestion({
       question: trimmed,
       state: resolvedState,
       topVehicle: resolvedTopVehicle,
       currentRoute: resolvedRoute,
-      onFallback: (reply) => {
-        if (overrides.showInWidget === false) return;
-        setMessages((prev) =>
-          prev.map((message) =>
-            message.id === assistantMessageId ? { ...message, text: reply } : message,
-          ),
-        );
-      },
-      onSuccess: (reply) => {
-        if (overrides.showInWidget === false) return;
-        setMessages((prev) =>
-          prev.map((message) =>
-            message.id === assistantMessageId ? { ...message, text: reply } : message,
-          ),
-        );
-      },
+      fallbackText: overrides.fallbackText,
+    }).then((result) => {
+      appendAiLog({ area: overrides.area || "AI action", question: trimmed, source: result.source, error: result.error || "" });
+      logAiDevEvent({
+        area: overrides.area || "AI action",
+        action: "Gemini istegi tamamlandi",
+        vehicle: resolvedTopVehicle?.name || "",
+        route: resolvedRoute,
+        source: result.source,
+        error: result.error || "",
+      });
+      if (overrides.showInWidget !== false) {
+        const text = result.text;
+        const delay = result.source === "fallback" ? 180 : 0;
+        window.setTimeout(() => {
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === assistantMessageId ? { ...message, text } : message,
+            ),
+          );
+        }, delay);
+      }
+
+      if (overrides.returnResult) {
+        return result;
+      }
+
+      return result.text;
+    });
+  };
+
+  const updateSiteSettings = (updates) => {
+    setSiteSettings((prev) => ({ ...prev, ...updates }));
+  };
+
+  const createReservation = (payload) => {
+    const vehicle = vehicles.find((item) => item.id === payload.vehicleId);
+    if (!vehicle) return null;
+
+    const reservation = {
+      id: `rez-${Date.now()}`,
+      status: "Yeni talep",
+      createdAt: new Date().toLocaleString("tr-TR"),
+      vehicleId: vehicle.id,
+      vehicleName: vehicle.name,
+      route: routeLabel,
+      departureDate: state.departureDate,
+      returnDate: state.returnDate,
+      passengers: state.adults + state.children,
+      luggage: `${state.largeBags} büyük, ${state.mediumBags} orta, ${state.backpacks} sırt çantası`,
+      dailyPrice: vehicle.price,
+      ...payload,
+    };
+
+    setReservations((prev) => [reservation, ...prev].slice(0, 20));
+    return reservation;
+  };
+
+  const updateReservationStatus = (reservationId, status) => {
+    setReservations((prev) =>
+      prev.map((reservation) =>
+        reservation.id === reservationId ? { ...reservation, status } : reservation,
+      ),
+    );
+  };
+
+  const askGeminiForVehicleSummary = (vehicle) => {
+    const variationKey = Date.now() + Math.floor(Math.random() * 1000);
+    const fallbackSummary = buildVehicleSummary(vehicle, variationKey);
+    const angles = [
+      "yakıt ekonomisi ve günlük kullanım rahatlığı",
+      "bagaj, kabin pratikliği ve aile/şehir kullanımı",
+      "fiyat-performans dengesi ve uzun yol kullanılabilirliği",
+      "sade, güven veren kiralama profili ve rota esnekliği",
+    ];
+    const openings = [
+      "araç adıyla başla",
+      "yakıt ve tüketim avantajıyla başla",
+      "kullanım senaryosuyla başla",
+      "bagaj ve kabin pratikliğiyle başla",
+    ];
+    const selectedAngle = angles[variationKey % angles.length];
+    const selectedOpening = openings[Math.floor(variationKey / angles.length) % openings.length];
+    console.info(`[AI] Admin arac aciklamasi uretilecek: ${vehicle.name}`);
+    const prompt = [
+      "Sen bir rent a car katalog metni yazarı ve araç uygunluk uzmanısın.",
+      "Görev: Aşağıdaki tek araç için katalog kartında kullanılacak açıklayıcı araç betimlemesi üret.",
+      "Yanıt yalnızca Türkçe olsun ve 2-3 doğal cümleden oluşsun.",
+      "Toplam uzunluk 280-420 karakter aralığında olsun.",
+      "Bu istek her çalıştırıldığında aynı araç için yeni bir metin üretmelidir; önceki cevap kalıbını veya aynı cümle sırasını tekrar etme.",
+      `Bu denemede anlatım odağı: ${selectedAngle}.`,
+      `Bu denemede başlangıç biçimi: ${selectedOpening}.`,
+      `Varyasyon kimliği: ${variationKey}. Bu kimliği metinde yazma; sadece farklı ifade seçmek için kullan.`,
+      "Başına 'AI yorumu', 'Gemini', madde işareti veya tırnak koyma.",
+      "Kullanıcının mevcut seyahat formuna göre değil, yalnızca araç verisine göre yaz.",
+      "Uydurma donanım, güvenlik paketi, stok bilgisi veya kampanya ekleme.",
+      "Yalnızca verilen özellikleri kullan: fiyat, yakıt, vites, tüketim, bagaj, koltuk, konfor, performans ve kullanım tipi.",
+      "Aracı 'ekonomik dizel' gibi tek etikete indirgeme; sürüş karakterini, bagaj/pratiklik tarafını ve hangi kullanımda mantıklı olduğunu açıkla.",
+      "Pazarlama abartısı yapma; teknik verilerden gerçekçi çıkarım yap.",
+      "",
+      `Araç adı: ${vehicle.name}`,
+      `Segment: ${vehicle.segment}`,
+      `Kategori: ${vehicle.category}`,
+      `Segment etiketi: ${vehicle.segmentTag}`,
+      `Günlük fiyat: ${vehicle.price} TL`,
+      `Yakıt: ${vehicle.fuel}`,
+      `Vites: ${vehicle.transmission || "Otomatik"}`,
+      `Tüketim: ${vehicle.consumption} L/100km`,
+      `Bagaj: ${vehicle.luggage} L`,
+      `Koltuk: ${vehicle.seats}`,
+      `Konfor: ${vehicle.comfort}/10`,
+      `Performans: ${vehicle.performance}/10`,
+      `Uygun rota etiketleri: ${vehicle.routeFit?.join(", ")}`,
+      `Mevcut not: ${vehicle.notes}`,
+    ].join(" ");
+
+    return generateGeminiText(prompt, fallbackSummary, 260).then((result) => {
+      appendAiLog({ area: "Admin araç açıklaması", question: vehicle.name, source: result.source, error: result.error || "" });
+      console.info(
+        `[AI] Admin arac aciklamasi tamamlandi: ${vehicle.name} kaynak=${result.source}${
+          result.error ? ` hata=${result.error}` : ""
+        }`,
+      );
+      const text = result.text
+        .replace(/^["“”']|["“”']$/g, "")
+        .replace(/^AI yorumu:\s*/i, "")
+        .replace(/^Gemini:\s*/i, "")
+        .trim();
+      const isTooShort = text.length < 140;
+
+      return {
+        text: isTooShort ? fallbackSummary : text,
+        source: isTooShort ? "fallback" : result.source,
+        error: isTooShort ? "short-gemini-summary" : result.error || "",
+      };
     });
   };
 
@@ -357,6 +545,8 @@ export function TripProvider({ children }) {
     setState,
     vehicles,
     setVehicles,
+    campaigns,
+    setCampaigns,
     analysisVisible,
     analysisRunning,
     analysisStep,
@@ -373,6 +563,17 @@ export function TripProvider({ children }) {
     setWidgetDraft,
     messages,
     setMessages,
+    siteSettings,
+    updateSiteSettings,
+    defaultSiteSettings,
+    reservations,
+    createReservation,
+    updateReservationStatus,
+    aiRequestLog,
+    aiRecommendation,
+    aiRecommendationLoading,
+    aiRecommendationError,
+    geminiStatus: getGeminiStatus(),
     ranked,
     catalog,
     routeLabel,
@@ -380,6 +581,7 @@ export function TripProvider({ children }) {
     handleAnalyze,
     handleSendMessage,
     askGemini,
+    askGeminiForVehicleSummary,
     buildRiskWarningsForTop: () => (ranked[0]?.vehicle ? buildRiskWarnings(ranked[0].vehicle, state) : []),
     buildRiskWarnings,
   };

@@ -7,8 +7,8 @@ export function SiteLayout() {
   return (
     <div>
       <div className="page-bg">
-        <div className="orb orb-one" />
-        <div className="orb orb-two" />
+        <div className="ambient-band ambient-band-one" />
+        <div className="ambient-band ambient-band-two" />
         <div className="grid-overlay" />
       </div>
       <Header />

@@ -1,26 +1,31 @@
 import { Link } from "react-router-dom";
+import { useTrip } from "../TripContext";
 
 export function Footer() {
+  const { siteSettings } = useTrip();
+  const logoLabel = siteSettings.logoText?.trim() || siteSettings.siteName?.trim()?.slice(0, 1) || "R";
+
   return (
     <footer className="site-footer">
       <div className="footer-brand">
-        <span className="brand-mark">T</span>
+        <span className="brand-mark">
+          {siteSettings.logoUrl ? <img src={siteSettings.logoUrl} alt="" className="brand-image" /> : logoLabel}
+        </span>
         <div>
-          <strong>TripAI</strong>
-          <p>AI destekli araç öneri ve seyahat planlama platformu.</p>
+          <strong>{siteSettings.siteName}</strong>
+          <p>{siteSettings.footerText}</p>
         </div>
       </div>
       <div className="footer-links">
         <Link to="/">Ana Sayfa</Link>
-        <Link to="/vehicles">Araçlar</Link>
-        <Link to="/planner">AI ile Araç Bul</Link>
-        <Link to="/campaigns">Kampanyalar</Link>
-        <Link to="/offices">Ofisler</Link>
-        <Link to="/admin">Admin</Link>
+        <Link to="/vehicles">Filo</Link>
+        <Link to="/planner">Akıllı Öneri</Link>
+        <Link to="/campaigns">Fırsatlar</Link>
+        <Link to="/admin">Yönetim</Link>
       </div>
       <div className="footer-meta">
-        <span>KVKK · Gizlilik · Kullanım Şartları</span>
-        <span>Mock demo · Login gerekmez</span>
+        <span>{siteSettings.footerLegal}</span>
+        <span>{siteSettings.footerNote}</span>
       </div>
     </footer>
   );
