@@ -19,7 +19,7 @@ function geminiDevLoggerPlugin() {
     name: "gemini-dev-logger",
     configureServer(server) {
       const env = loadEnv(server.config.mode, process.cwd(), "");
-      const geminiApiKey = env.VITE_GEMINI_API_KEY;
+      const geminiApiKey = env.GEMINI_API_KEY;
       const geminiModel = env.VITE_GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
       const googleMapsApiKey = env.GOOGLE_MAPS_API_KEY || env.VITE_GOOGLE_MAPS_API_KEY;
       const geminiEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent`;
@@ -37,7 +37,7 @@ function geminiDevLoggerPlugin() {
         console.log(`[AI] Gemini istegi basladi model=${geminiModel}`);
 
         if (!geminiApiKey) {
-          console.log("[AI] Gemini istegi atlanildi: VITE_GEMINI_API_KEY yok");
+          console.log("[AI] Gemini istegi atlanildi: GEMINI_API_KEY yok");
           res.statusCode = 400;
           res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ error: "missing-api-key" }));

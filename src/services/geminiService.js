@@ -2,11 +2,7 @@ import { assistantReply } from "../data";
 import { orchestrateAiAgents } from "./aiAgents";
 
 export const GEMINI_MODEL = import.meta.env.VITE_GEMINI_MODEL || "gemini-2.5-flash";
-const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-const USE_DEV_GEMINI_PROXY = import.meta.env.DEV;
-const GEMINI_ENDPOINT = USE_DEV_GEMINI_PROXY
-  ? "/api/gemini"
-  : `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const GEMINI_ENDPOINT = "/api/gemini";
 const RETRYABLE_GEMINI_STATUSES = new Set([429, 500, 502, 503, 504]);
 
 class GeminiApiError extends Error {
@@ -59,7 +55,7 @@ export function getGeminiUserMessage(error) {
 export function getGeminiStatus() {
   return {
     model: GEMINI_MODEL,
-    hasApiKey: Boolean(GEMINI_API_KEY),
+    hasApiKey: true,
     provider: "Google Gemini",
   };
 }
@@ -259,12 +255,7 @@ async function requestGeminiText(prompt, maxOutputTokens, attempt, options = {})
 
   const response = await fetch(GEMINI_ENDPOINT, {
     method: "POST",
-    headers: USE_DEV_GEMINI_PROXY
-      ? { "Content-Type": "application/json" }
-      : {
-          "Content-Type": "application/json",
-          "x-goog-api-key": GEMINI_API_KEY,
-        },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [
         {
@@ -298,8 +289,6 @@ async function requestGeminiText(prompt, maxOutputTokens, attempt, options = {})
 }
 
 async function fetchGeminiText(prompt, maxOutputTokens = 320, options = {}) {
-  if (!GEMINI_API_KEY && !USE_DEV_GEMINI_PROXY) return null;
-
   console.info(`[AI] Gemini calistiriliyor: ${GEMINI_MODEL}`);
   const payload = await requestGeminiText(prompt, maxOutputTokens, 0, options);
   console.info("[AI] Gemini yaniti alindi");
@@ -322,10 +311,6 @@ async function fetchGeminiText(prompt, maxOutputTokens = 320, options = {}) {
 export async function sendTripQuestion({ question, state, topVehicle, currentRoute, fallbackText: fallbackOverride }) {
   const fallbackText = fallbackOverride || assistantReply(question, state, topVehicle, currentRoute);
 
-  if (!GEMINI_API_KEY) {
-    return { text: fallbackText, source: "fallback", error: "missing-api-key" };
-  }
-
   try {
     const prompt = buildTripAssistantPrompt(question, state, topVehicle, currentRoute);
     const text = await fetchGeminiText(prompt, 260);
@@ -337,10 +322,6 @@ export async function sendTripQuestion({ question, state, topVehicle, currentRou
 }
 
 export async function generateGeminiText(prompt, fallbackText, maxOutputTokens = 420, options = {}) {
-  if (!GEMINI_API_KEY && !USE_DEV_GEMINI_PROXY) {
-    return { text: fallbackText, source: "fallback", error: "missing-api-key" };
-  }
-
   try {
     const text = await fetchGeminiText(prompt, maxOutputTokens, options);
     return { text: text || fallbackText, source: text ? "gemini" : "fallback", error: text ? "" : "invalid-gemini-text" };
@@ -352,10 +333,6 @@ export async function generateGeminiText(prompt, fallbackText, maxOutputTokens =
 
 export async function generateStructuredRecommendation(state, vehicles) {
   const localRecommendation = orchestrateAiAgents(vehicles, state);
-
-  if (!GEMINI_API_KEY) {
-    return { data: localRecommendation, source: "fallback", error: "missing-api-key" };
-  }
 
   try {
     const prompt = buildStructuredRecommendationPrompt(state, vehicles, localRecommendation);
